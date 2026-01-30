@@ -1,0 +1,5 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "pocket_sdr_v2.3-eagle-import")(type "KiCad")(uri "${KIPRJMOD}/pocket_sdr_v2.3-eagle-import.kicad_sym")(options "")(descr ""))
+  (lib (name "test")(type "KiCad")(uri "C:/share/PocketSDR/FE_8CH/HW/v4.1/pocket_sdr_v2.3-eagle-import.kicad_sym")(options "")(descr ""))
+)
