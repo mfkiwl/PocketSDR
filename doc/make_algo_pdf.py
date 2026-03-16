@@ -10,8 +10,10 @@ from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT, TA_JUSTIFY
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    HRFlowable, PageBreak, KeepTogether
+    HRFlowable, PageBreak, KeepTogether,
+    BaseDocTemplate, PageTemplate, Frame
 )
+from reportlab.platypus.tableofcontents import TableOfContents
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib import colors
@@ -43,6 +45,26 @@ MARGIN_L = 25 * mm
 MARGIN_R = 25 * mm
 MARGIN_T = 20 * mm
 MARGIN_B = 20 * mm
+
+# Number of front-matter pages (cover + TOC) — content pages start at FRONT_MATTER+1
+FRONT_MATTER = 2
+
+# ---------------------------------------------------------------------------
+# Page header: page number (top-left) + rule, matches command_ref.pdf
+# Cover (PDF page 1) and TOC (PDF page 2) have no header.
+# ---------------------------------------------------------------------------
+def draw_page_header(canvas, doc):
+    pn = canvas.getPageNumber()
+    if pn <= FRONT_MATTER:
+        return
+    display = pn - FRONT_MATTER          # content pages: 1, 2, 3 ...
+    canvas.saveState()
+    canvas.setFont('Calibri', 10)
+    canvas.drawString(MARGIN_L, PAGE_H - MARGIN_T + 4 * mm, str(display))
+    canvas.setLineWidth(0.5)
+    canvas.line(MARGIN_L, PAGE_H - MARGIN_T + 2 * mm,
+                PAGE_W - MARGIN_R, PAGE_H - MARGIN_T + 2 * mm)
+    canvas.restoreState()
 
 # ---------------------------------------------------------------------------
 # Styles
@@ -83,6 +105,12 @@ def make_styles():
         'cover_info', fontName='Calibri', fontSize=11, leading=16,
         spaceAfter=4, alignment=TA_LEFT)
 
+    # "Contents" heading in the TOC page — uses a non-h1 name so it is NOT
+    # captured by afterFlowable and does not appear in the TOC itself.
+    s['toc_section_title'] = ParagraphStyle(
+        'toc_section_title', fontName='Calibri-Bold', fontSize=14, leading=18,
+        spaceBefore=14, spaceAfter=10, alignment=TA_LEFT)
+
     s['toc_title'] = ParagraphStyle(
         'toc_title', fontName='Calibri-Bold', fontSize=12, leading=16,
         spaceBefore=4, spaceAfter=2, alignment=TA_LEFT)
@@ -117,31 +145,53 @@ def make_styles():
 STYLES = make_styles()
 
 # ---------------------------------------------------------------------------
-# Page template: header shows page number (top-left) like command_ref.pdf
+# Document template: BaseDocTemplate with TOC support
 # ---------------------------------------------------------------------------
-class DocWithPageNum(SimpleDocTemplate):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._page_num = 0
+class PocketSDRDoc(BaseDocTemplate):
+    """
+    Two-pass document template.
+    - draw_page_header() draws page numbers via the PageTemplate onPage callback.
+    - afterFlowable() notifies the TableOfContents of h1/h2 headings with the
+      correct display page number (pdf_page - FRONT_MATTER).
+    """
+    def __init__(self, filename, **kwargs):
+        # Build a single Frame for all pages (covers are handled by separate
+        # PageTemplate with no onPage callback).
+        top_margin  = kwargs.pop('topMargin',    MARGIN_T + 8 * mm)
+        bot_margin  = kwargs.pop('bottomMargin', MARGIN_B)
+        left_margin = kwargs.pop('leftMargin',   MARGIN_L)
+        right_margin= kwargs.pop('rightMargin',  MARGIN_R)
 
-    def handle_pageBegin(self):
-        super().handle_pageBegin()
-        self._page_num += 1
+        fw = PAGE_W - left_margin - right_margin
+        fh = PAGE_H - top_margin  - bot_margin
 
-    def afterPage(self):
-        canvas = self.canv
-        pn = self._page_num
-        if pn == 1:
-            return  # No header on cover page
-        canvas.saveState()
-        canvas.setFont('Calibri', 10)
-        # Page number top-left (matches command_ref.pdf)
-        canvas.drawString(MARGIN_L, PAGE_H - MARGIN_T + 4 * mm, str(pn - 1))
-        # Horizontal rule below page number
-        canvas.setLineWidth(0.5)
-        canvas.line(MARGIN_L, PAGE_H - MARGIN_T + 2 * mm,
-                    PAGE_W - MARGIN_R, PAGE_H - MARGIN_T + 2 * mm)
-        canvas.restoreState()
+        cover_frame   = Frame(left_margin, bot_margin, fw, fh, id='cover')
+        content_frame = Frame(left_margin, bot_margin, fw, fh, id='content')
+
+        cover_pt   = PageTemplate(id='Cover',   frames=[cover_frame])
+        content_pt = PageTemplate(id='Content', frames=[content_frame],
+                                  onPage=draw_page_header)
+
+        super().__init__(
+            filename,
+            pagesize=A4,
+            leftMargin=left_margin, rightMargin=right_margin,
+            topMargin=top_margin,   bottomMargin=bot_margin,
+            pageTemplates=[cover_pt, content_pt],
+            **kwargs
+        )
+
+    def afterFlowable(self, flowable):
+        """Register h1 headings with the TableOfContents.
+        Only h1 is registered so the TOC stays on one page, keeping
+        the page-number offset (FRONT_MATTER) correct across passes."""
+        if not isinstance(flowable, Paragraph):
+            return
+        if flowable.style.name != 'h1':
+            return
+        text = flowable.getPlainText()
+        display_page = max(1, self.page - FRONT_MATTER)
+        self.notify('TOCEntry', (0, text, display_page))
 
 # ---------------------------------------------------------------------------
 # Helper: code block
@@ -201,45 +251,36 @@ def build_cover():
     return story
 
 def build_toc():
+    """
+    Return the TOC page: heading + TableOfContents flowable.
+    TableOfContents is populated automatically by PocketSDRDoc.afterFlowable()
+    via the 'TOCEntry' notification during multiBuild.
+    """
     S = STYLES
     story = []
-    story.append(Paragraph('Contents', S['h1']))
-    story.append(Spacer(1, 2 * mm))
 
-    toc_data = [
-        ('1.', 'System Overview', []),
-        ('2.', 'IF Data Handling', [
-            'Data Format', 'Sampling Parameters', 'GLONASS FDMA Frequency Shift']),
-        ('3.', 'Spreading Code Generation', [
-            'Code Types', 'Code Generation Method',
-            'Code FFT Pre-computation', 'Code Resampling']),
-        ('4.', 'Signal Acquisition', [
-            'Parallel Code Search', 'Non-Coherent Integration',
-            'Detection and Threshold', 'Fine Doppler Estimation',
-            'Doppler Search Range']),
-        ('5.', 'Signal Tracking', [
-            'Correlator Structure', 'Carrier Tracking: FLL and PLL',
-            'Code Tracking: DLL', 'C/N0 Estimation',
-            'Secondary Code Synchronization', 'CSK Demodulation (QZSS L6)']),
-        ('6.', 'Navigation Data Decoding', [
-            'Symbol Synchronization', 'Frame Synchronization',
-            'Supported Navigation Messages']),
-        ('7.', 'Error Correction', [
-            'Convolutional Coding / Viterbi Decoding', 'CRC Checking',
-            'LDPC Decoding', 'BCH Error Correction', 'Reed-Solomon Decoding']),
-        ('8.', 'PVT Generation', [
-            'Overview', 'Observation Data', 'Positioning Engine',
-            'Output Formats']),
-        ('9.', 'Snapshot Positioning', ['Principle', 'Algorithm']),
-        ('10.', 'Receiver Channel State Machine', [
-            'State Transitions', 'Timing Parameters']),
+    # "Contents" title — uses toc_section_title (not 'h1') so it is never
+    # registered as a TOC entry.
+    story.append(Paragraph('Contents', S['toc_section_title']))
+
+    toc = TableOfContents()
+    toc.levelStyles = [
+        ParagraphStyle(
+            'TOCLevel0',
+            fontName='Calibri-Bold', fontSize=10, leading=14,
+            leftIndent=0, firstLineIndent=0,
+            spaceAfter=3, spaceBefore=3,
+            rightIndent=0,
+        ),
+        ParagraphStyle(
+            'TOCLevel1',
+            fontName='Calibri', fontSize=9.5, leading=13,
+            leftIndent=16, firstLineIndent=0,
+            spaceAfter=1, spaceBefore=1,
+            rightIndent=0,
+        ),
     ]
-
-    for num, title, subs in toc_data:
-        story.append(Paragraph(f'{num}&nbsp;&nbsp;{title}', S['toc_title']))
-        for sub in subs:
-            story.append(Paragraph(f'&nbsp;&nbsp;&nbsp;&nbsp;{sub}', S['toc_sub']))
-
+    story.append(toc)
     story.append(PageBreak())
     return story
 
@@ -1009,11 +1050,12 @@ def build_refs():
 # Main
 # ---------------------------------------------------------------------------
 def main():
+    from reportlab.platypus import NextPageTemplate
+
     out_path = 'C:/share/PocketSDR/.claude/worktrees/sad-vaughan/doc/algorithms_and_models.pdf'
 
-    doc = DocWithPageNum(
+    doc = PocketSDRDoc(
         out_path,
-        pagesize=A4,
         leftMargin=MARGIN_L,
         rightMargin=MARGIN_R,
         topMargin=MARGIN_T + 8 * mm,
@@ -1024,8 +1066,13 @@ def main():
     )
 
     story = []
-    story += build_cover()
-    story += build_toc()
+    # Cover on 'Cover' template (no header), then switch to 'Content' template
+    story.append(NextPageTemplate('Cover'))
+    story += build_cover()             # ends with PageBreak
+    # TOC page also has no header (still PDF page 2 = front matter)
+    story += build_toc()               # ends with PageBreak
+    # Switch to 'Content' template — page numbers appear from here onward
+    story.append(NextPageTemplate('Content'))
     story += sec1()
     story.append(PageBreak())
     story += sec2()
@@ -1048,7 +1095,8 @@ def main():
     story.append(PageBreak())
     story += build_refs()
 
-    doc.build(story)
+    # multiBuild: first pass collects TOC page numbers, second pass renders them
+    doc.multiBuild(story)
     print(f'PDF generated: {out_path}')
 
 if __name__ == '__main__':
