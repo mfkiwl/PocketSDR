@@ -15,6 +15,11 @@ from reportlab.platypus import (
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.lib import colors
+from reportlab.graphics.shapes import (
+    Drawing, Rect, String, Line, Polygon, Group
+)
+from reportlab.graphics import renderPDF
+from reportlab.platypus.flowables import Flowable
 import os, sys
 
 # ---------------------------------------------------------------------------
@@ -795,6 +800,132 @@ def sec9():
     return story
 
 # ---------------------------------------------------------------------------
+# State machine diagram (ReportLab Drawing)
+# ---------------------------------------------------------------------------
+def state_machine_drawing(width=440):
+    """
+    Draw the IDLE/SRCH/LOCK state machine diagram.
+    Layout (left to right):  IDLE --- SRCH
+                                        |
+                             IDLE <-- LOCK
+    with a wrap-around arc from LOCK back to IDLE via the top.
+    """
+    BW, BH = 80, 36        # box width/height
+    FN  = 'Calibri-Bold'
+    FNr = 'Calibri'
+    FS  = 9
+    GREY = colors.HexColor('#D8D8D8')
+    BLACK = colors.black
+    BLUE  = colors.HexColor('#1F497D')
+
+    # Box centres  (x, y)  — y increases upward in RL coordinates
+    H = 160   # drawing height
+    cy_mid = H / 2         # vertical centre for IDLE and SRCH
+    cx_idle = 70
+    cx_srch = 230
+    cx_lock = 370
+
+    def box(cx, cy, label):
+        g = Group()
+        g.add(Rect(cx - BW/2, cy - BH/2, BW, BH,
+                   fillColor=GREY, strokeColor=BLACK, strokeWidth=0.8))
+        g.add(String(cx, cy - FS/2, label,
+                     fontName=FN, fontSize=FS+1,
+                     fillColor=BLACK, textAnchor='middle'))
+        return g
+
+    def arrow(x1, y1, x2, y2, label='', label_above=True, color=BLACK):
+        """Straight arrow from (x1,y1) to (x2,y2)."""
+        g = Group()
+        g.add(Line(x1, y1, x2, y2, strokeColor=color, strokeWidth=0.8))
+        # arrowhead
+        dx, dy = x2 - x1, y2 - y1
+        L = (dx*dx + dy*dy) ** 0.5
+        if L == 0:
+            return g
+        ux, uy = dx/L, dy/L
+        aw, ah = 5, 9
+        tip = (x2, y2)
+        p1 = (x2 - uy*aw - ux*ah, y2 + ux*aw - uy*ah)
+        p2 = (x2 + uy*aw - ux*ah, y2 - ux*aw - uy*ah)
+        g.add(Polygon([tip[0], tip[1], p1[0], p1[1], p2[0], p2[1]],
+                      fillColor=color, strokeColor=color, strokeWidth=0.5))
+        if label:
+            mx = (x1 + x2) / 2
+            my = (y1 + y2) / 2
+            off = 8 if label_above else -8
+            # rotate label for vertical arrows
+            if abs(dx) < 1:
+                g.add(String(mx + off, my, label,
+                             fontName=FNr, fontSize=FS - 1,
+                             fillColor=color, textAnchor='start' if off > 0 else 'end'))
+            else:
+                g.add(String(mx, my + off, label,
+                             fontName=FNr, fontSize=FS - 1,
+                             fillColor=color, textAnchor='middle'))
+        return g
+
+    d = Drawing(width, H)
+
+    # -- IDLE -> SRCH (top, left to right) -----------------------------------
+    d.add(arrow(cx_idle + BW/2, cy_mid + 8,
+                cx_srch - BW/2, cy_mid + 8,
+                'C/N0 >= 35 dB-Hz  (signal acquired)', label_above=True))
+
+    # -- SRCH -> IDLE (bottom, right to left — "not found") ------------------
+    d.add(arrow(cx_srch - BW/2, cy_mid - 8,
+                cx_idle + BW/2, cy_mid - 8,
+                'signal not found', label_above=False))
+
+    # -- SRCH -> LOCK (right side, top to bottom) ----------------------------
+    d.add(arrow(cx_srch + BW/2, cy_mid,
+                cx_lock - BW/2, cy_mid,
+                'signal found', label_above=True))
+
+    # -- LOCK -> IDLE  (diagonal arc via bottom) ----------------------------
+    # Use a polyline:  LOCK bottom -> midpoint bottom -> IDLE bottom -> IDLE
+    lx = cx_lock - BW/2
+    ly = cy_mid - BH/2
+    mid_x = (cx_idle + cx_lock) / 2
+    bot_y = 14
+    ix = cx_idle
+    iy = cy_mid - BH/2
+    g = Group()
+    pts = [lx + BW/2, ly,
+           mid_x,    bot_y + 4,
+           cx_idle + BW/2 - 10, bot_y + 4]
+    for i in range(0, len(pts) - 2, 2):
+        g.add(Line(pts[i], pts[i+1], pts[i+2], pts[i+3],
+                   strokeColor=BLACK, strokeWidth=0.8))
+    # last segment with arrow
+    g.add(arrow(cx_idle + BW/2 - 10, bot_y + 4,
+                cx_idle + BW/2, iy,
+                '', color=BLACK))
+    g.add(String(mid_x, bot_y - 4,
+                 'C/N0 < 32 dB-Hz  (signal lost)',
+                 fontName=FNr, fontSize=FS - 1,
+                 fillColor=BLACK, textAnchor='middle'))
+    d.add(g)
+
+    # -- Boxes (drawn last so they sit on top of arrows) ---------------------
+    d.add(box(cx_idle, cy_mid, 'IDLE'))
+    d.add(box(cx_srch, cy_mid, 'SRCH'))
+    d.add(box(cx_lock, cy_mid, 'LOCK'))
+
+    return d
+
+# Wrap Drawing as a Platypus Flowable
+class DrawingFlowable(Flowable):
+    def __init__(self, drawing):
+        super().__init__()
+        self.drawing = drawing
+        self.width  = drawing.width
+        self.height = drawing.height
+
+    def draw(self):
+        renderPDF.draw(self.drawing, self.canv, 0, 0)
+
+# ---------------------------------------------------------------------------
 # Section 10: Receiver Channel State Machine
 # ---------------------------------------------------------------------------
 def sec10():
@@ -807,19 +938,10 @@ def sec10():
         'Each receiver channel (sdr_ch.py) is an independent state machine with '
         'three states:',
         S['normal']))
-    story += code_block("""\
-         +------------------------------------------+
-         |                                          |
-    +----+----+  C/N0 >= threshold   +------------+ |
-    |  IDLE   |--------------------->|    SRCH    | |
-    +---------+                      +------------+ |
-         ^                                 |        |
-         |                     signal      |        |
-         |                     found       v        |
-         |                          +------------+  |
-         +--------------------------+    LOCK    |--+
-              signal lost           +------------+
-                                     C/N0 < threshold""")
+    usable_w = PAGE_W - MARGIN_L - MARGIN_R
+    story.append(Spacer(1, 3 * mm))
+    story.append(DrawingFlowable(state_machine_drawing(width=float(usable_w))))
+    story.append(Spacer(1, 3 * mm))
 
     headers = ['State', 'Description']
     rows = [
