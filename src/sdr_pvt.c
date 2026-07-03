@@ -753,6 +753,11 @@ static double gen_prng(gtime_t time, const sdr_ch_t *ch)
     } else {
         return 0.0;
     }
+    if (tau < 0.05 || tau > 0.167) { // reject physically invalid pseudorange
+        sdr_log(3, "$LOG,%.3f,%s,%s,%d,PSEUDORANGE OUT OF RANGE (%.6f)",
+            ch->time, ch->sat, ch->sig, ch->prn, tau);
+        return 0.0;
+    }
     // for debug
     trace(3, "%s %-5s %3d %4d %10.3f %10.3f %12.9f %12.9f\n", ch->sat, ch->sig,
         ch->prn, ch->week, tow, ch->tow * 1e-3, ch->coff, tau);
@@ -1163,6 +1168,32 @@ static void res_obs_amb(obs_t *obs, int sys, uint8_t code, double sec)
     }
 }
 
+// align integer-ms offset in pseudorange to reference signal ------------------
+static void res_obs_consist(double time, obs_t *obs)
+{
+    double Lms = CLIGHT * 1e-3;
+
+    for (int i = 0; i < obs->n; i++) {
+        obsd_t *data = obs->data + i;
+        int r;
+        for (r = 0; r < NFREQ + NEXOBS; r++) { // reference = lowest valid index
+            if (data->P[r] > 0.0) break;
+        }
+        if (r >= NFREQ + NEXOBS) continue;
+        for (int j = 0; j < NFREQ + NEXOBS; j++) {
+            if (j == r || data->P[j] <= 0.0) continue;
+            double off = floor((data->P[j] - data->P[r]) / Lms + 0.5);
+            if (off == 0.0) continue;
+            char sat[16];
+            satno2id(data->sat, sat);
+            if (sat[0] == '1') sat[0] = 'S';
+            sdr_log(4, "$LOG,%.3f,%s,%s,PSEUDORANGE ALIGNED (%+.0f ms)", time,
+                sat, code2obs(data->code[j]), off);
+            data->P[j] -= off * Lms;
+        }
+    }
+}
+
 //------------------------------------------------------------------------------
 //  Update PVT solution.
 //
@@ -1180,12 +1211,17 @@ void sdr_pvt_udsol(sdr_pvt_t *pvt, int64_t ix)
     if (pvt->ix > 0 && (pvt->nch >= pvt->rcv->nch ||
         ix >= pvt->ix + (int)(sdr_lag_epoch / SDR_CYC))) {
         
-        // resolve msec ambiguity in pseudorange
-        res_obs_amb(pvt->obs, SYS_GPS | SYS_QZS, CODE_L5Q, 20e-3); // L5Q
-        res_obs_amb(pvt->obs, SYS_QZS, CODE_L5P, 20e-3); // L5SQ, L5SQV
-        res_obs_amb(pvt->obs, SYS_GLO, CODE_L3Q, 10e-3); // G3OCP
-        res_obs_amb(pvt->obs, SYS_SBS, CODE_L5Q, 2e-3);  // L5Q SBAS
-        
+        // resolve msec ambiguity in pseudorange (1 ms primary code period)
+        res_obs_amb(pvt->obs, SYS_GPS | SYS_QZS, CODE_L5Q, 1e-3); // L5Q
+        res_obs_amb(pvt->obs, SYS_QZS, CODE_L5P, 1e-3); // L5SQ, L5SQV
+        res_obs_amb(pvt->obs, SYS_QZS, CODE_L1Z, 1e-3); // L1S
+        res_obs_amb(pvt->obs, SYS_GLO, CODE_L3Q, 1e-3); // G3OCP
+        res_obs_amb(pvt->obs, SYS_SBS, CODE_L5I, 1e-3); // L5I SBAS
+        res_obs_amb(pvt->obs, SYS_SBS, CODE_L5Q, 1e-3); // L5Q SBAS
+
+        // align integer-ms offset to reference signal
+        res_obs_consist(pvt->ix * SDR_CYC, pvt->obs);
+
         // sort obs data
         sortobs(pvt->obs);
         

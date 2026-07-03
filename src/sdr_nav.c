@@ -1616,11 +1616,24 @@ static void decode_D1D2NAV(sdr_ch_t *ch, int type, const uint8_t *syms, int rev)
         memcpy(bits + i + 22, s1 + 11, 4);
         memcpy(bits + i + 26, s2 + 11, 4);
     }
+    sdr_pack_bits(bits, 300, 0, data);
+    int sf = getbitu(data, 15, 3), pg = getbitu(data, 42, 4);
+    if (nerr > 5 || sf < 1 || sf > 5) { // reject broken frame
+        unsync_nav(ch);
+        ch->nav->count[1]++;
+        sdr_log(3, "$LOG,%.3f,%s,%s,%d,BDS D1D2 FRAME ERROR (%d,%d)", time,
+            ch->sat, ch->sig, ch->prn, nerr, sf);
+        return;
+    }
     ch->nav->ssync = ch->nav->fsync = ch->lock;
     ch->nav->rev = rev;
     ch->nav->nerr = nerr;
-    sdr_pack_bits(bits, 300, 0, data);
-    int sf = getbitu(data, 15, 3), pg = getbitu(data, 42, 4);
+    if (ch->tow <= 0) { // for diagnosis of initial TOW latch
+        sdr_log(3, "$LOG,%.3f,%s,%s,%d,D1D2 LATCH %d %d %d %d %d %d", time,
+            ch->sat, ch->sig, ch->prn, getbitu(data, 18, 8) * 4096 +
+            getbitu(data, 30, 12), sf, nerr, ch->lock, ch->trk->sec_sync,
+            ch->trk->sec_pol);
+    }
     if (type == 1 && sf == 1) {
         ch->week = getbitu(data, 60, 13) + GPST_BDT_W;
     } else if (type == 2 && sf == 1 && pg == 1) {
