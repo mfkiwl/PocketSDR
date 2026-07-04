@@ -18,6 +18,7 @@
 //  2024-06-29  1.7  add API sdr_dev_get_info(), sdr_dev_set_gain(),
 //                   sdr_dev_get_gain()
 //  2024-12-30  1.8  add API sdr_dev_get_filt(), sdr_dev_set_filt()
+//  2026-07-04  1.9  fix display corruption by async scheduling error message
 //
 #include "pocket_sdr.h"
 #ifdef WIN32
@@ -224,9 +225,9 @@ static void *event_handler(void *arg)
     
     dev->rp = dev->wp = 0;
     
-    // set thread scheduling real-time
+    // set thread scheduling real-time (log only - async stderr breaks display)
     if (pthread_setschedparam(dev->thread, SCHED_RR, &param)) {
-        fprintf(stderr, "set thread scheduling error\n");
+        sdr_log(3, "$LOG,%.3f,%s,%d,set thread scheduling error", 0.0, "", 0);
     }
     while (dev->state) {
         if (libusb_handle_events_timeout(NULL, &to)) continue;
