@@ -74,6 +74,7 @@ else ifeq ($(UNAME_S),Darwin)
     SYS_LIBS += -lpthread
     ifeq ($(UNAME_M),arm64)
         INCLUDE += -I/opt/homebrew/include
+        LDFLAGS += -L/opt/homebrew/lib
         OPTIONS += -DNEON
     else ifeq ($(USE_AVX2),1)
         OPTIONS += -DAVX2 -mavx2 -mfma
@@ -82,7 +83,7 @@ else
     LDFLAGS += -Wl,--gc-sections
     SYS_LIBS += -lm -lpthread
     ifeq ($(UNAME_M),aarch64)
-        OPTIONS += -DNEON
+        OPTIONS += -DNEON -mcpu=native
     else ifeq ($(USE_AVX2),1)
         OPTIONS += -DAVX2 -mavx2 -mfma
     endif
