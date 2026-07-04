@@ -31,6 +31,8 @@
 //                   modify API sdr_corr_std(), sdr_corr_std_cpx()
 //  2025-11-15  1.17 add API sdr_cpx_fft()
 //                   modify API sdr_tag_read(), sdr_tag_write()
+//  2026-07-04  1.18 optimize NEON codes in sdr_cpx_mul(), dot_IQ_code()
+//                   add NEON codes in mix_carr(), sdr_lpf_apply()
 //
 #include <math.h>
 #include <stdarg.h>
@@ -216,13 +218,13 @@ void sdr_cpx_mul(const sdr_cpx_t *a, const sdr_cpx_t *b, int N, float s,
     for (; i < N - 3; i += 4) {
         float32x4x2_t va = vld2q_f32((const float32_t *)(a + i));
         float32x4x2_t vb = vld2q_f32((const float32_t *)(b + i));
-        float32x4_t re = vsubq_f32(vmulq_f32(va.val[0], vb.val[0]),
-            vmulq_f32(va.val[1], vb.val[1]));
-        float32x4_t im = vaddq_f32(vmulq_f32(va.val[0], vb.val[1]),
-            vmulq_f32(va.val[1], vb.val[0]));
-        re = vmulq_f32(re, scale);
-        im = vmulq_f32(im, scale);
-        float32x4x2_t vc = {{re, im}};
+        float32x4x2_t vc;
+        vc.val[0] = vfmsq_f32(vmulq_f32(va.val[0], vb.val[0]), va.val[1],
+            vb.val[1]);
+        vc.val[1] = vfmaq_f32(vmulq_f32(va.val[0], vb.val[1]), va.val[1],
+            vb.val[0]);
+        vc.val[0] = vmulq_f32(vc.val[0], scale);
+        vc.val[1] = vmulq_f32(vc.val[1], scale);
         vst2q_f32((float32_t *)(c + i), vc);
     }
 #endif
@@ -371,7 +373,27 @@ void sdr_lpf_apply(sdr_lpf_t *lpf, sdr_cpx8_t *data, int N)
             I[i] = lpf->I[j];
             Q[i] = lpf->Q[j];
         }
-        for (i = 0; i < n; i++) {
+        i = 0;
+#if defined(NEON)
+        for ( ; i + 16 <= n; i += 16) { // unpack 4-bit I/Q to int32
+            int8x16_t d = vld1q_s8((const int8_t *)(data + i));
+            int8x16_t dI = vshrq_n_s8(vshlq_n_s8(d, 4), 4);
+            int8x16_t dQ = vshrq_n_s8(d, 4);
+            int16x8_t wl = vmovl_s8(vget_low_s8(dI));
+            int16x8_t wh = vmovl_s8(vget_high_s8(dI));
+            vst1q_s32(I + HIST + i     , vmovl_s16(vget_low_s16 (wl)));
+            vst1q_s32(I + HIST + i + 4 , vmovl_s16(vget_high_s16(wl)));
+            vst1q_s32(I + HIST + i + 8 , vmovl_s16(vget_low_s16 (wh)));
+            vst1q_s32(I + HIST + i + 12, vmovl_s16(vget_high_s16(wh)));
+            wl = vmovl_s8(vget_low_s8(dQ));
+            wh = vmovl_s8(vget_high_s8(dQ));
+            vst1q_s32(Q + HIST + i     , vmovl_s16(vget_low_s16 (wl)));
+            vst1q_s32(Q + HIST + i + 4 , vmovl_s16(vget_high_s16(wl)));
+            vst1q_s32(Q + HIST + i + 8 , vmovl_s16(vget_low_s16 (wh)));
+            vst1q_s32(Q + HIST + i + 12, vmovl_s16(vget_high_s16(wh)));
+        }
+#endif
+        for ( ; i < n; i++) {
             I[HIST+i] = SDR_CPX8_I(data[i]);
             Q[HIST+i] = SDR_CPX8_Q(data[i]);
         }
@@ -424,7 +446,8 @@ void sdr_lpf_apply(sdr_lpf_t *lpf, sdr_cpx8_t *data, int N)
             accQ = (accQ + (1 << (LPF_H_SHIFT - 1))) >> LPF_H_SHIFT;
             data[i] = SDR_CPX8(CLIP(accI, -7, 7), CLIP(accQ, -7, 7));
         }
-        for (i = 0; i < n; i++) {
+        // only the last HIST samples survive in the history ring
+        for (i = (n > HIST) ? n - HIST : 0; i < n; i++) {
             int j = (lpf->pos + i) & LPF_HIST_MASK;
             lpf->I[j] = I[HIST+i];
             lpf->Q[j] = Q[HIST+i];
@@ -799,6 +822,31 @@ static void mix_carr(const sdr_buff_t *buff, int ix, int N, double phi,
             IQ[i+j] = mix_tbl[idx[j]];
         }
     }
+#elif defined(NEON)
+    uint32_t p4[4] = {p, p + s, p + s * 2, p + s * 3};
+    uint32x4_t yp0 = vld1q_u32(p4);
+    uint32x4_t yp1 = vaddq_u32(yp0, vdupq_n_u32(s * 4));
+    uint32x4_t ys8 = vdupq_n_u32(s * 8);
+    
+    for ( ; i < N - 15; i += 16) {
+        uint16_t idx[16];
+        uint8x16_t ydat = vld1q_u8(data + i);
+        uint16x8_t yd0 = vshll_n_u8(vget_low_u8(ydat), 8);
+        uint16x8_t yd1 = vshll_n_u8(vget_high_u8(ydat), 8);
+        uint16x4_t yph0 = vmovn_u32(vshrq_n_u32(yp0, 24));
+        uint16x4_t yph1 = vmovn_u32(vshrq_n_u32(yp1, 24));
+        yp0 = vaddq_u32(yp0, ys8);
+        yp1 = vaddq_u32(yp1, ys8);
+        uint16x4_t yph2 = vmovn_u32(vshrq_n_u32(yp0, 24));
+        uint16x4_t yph3 = vmovn_u32(vshrq_n_u32(yp1, 24));
+        yp0 = vaddq_u32(yp0, ys8);
+        yp1 = vaddq_u32(yp1, ys8);
+        vst1q_u16(idx, vorrq_u16(yd0, vcombine_u16(yph0, yph1)));
+        vst1q_u16(idx + 8, vorrq_u16(yd1, vcombine_u16(yph2, yph3)));
+        for (int j = 0; j < 16; j++) {
+            IQ[i+j] = mix_tbl[idx[j]];
+        }
+    }
 #endif
     for (p += s * i; i < N; i++, p += s) {
         int idx = ((int)data[i] << 8) + (p >> 24);
@@ -848,7 +896,7 @@ static void mix_carr_cpx(const sdr_cpx_t *buff, int len_buff, int ix, int N,
 }
 
 // sum of int16 fields ---------------------------------------------------------
-#if defined(NEON)
+#if defined(NEON) && !defined(__ARM_FEATURE_DOTPROD)
 #define sum_s16(ymm, sum) { \
     int16_t s[8]; \
     vst1q_s16(s, ymm); \
@@ -886,6 +934,18 @@ static void dot_IQ_code(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code, int N,
     _mm256_storeu_si256((__m256i *)sQ, ysumQ);
     (*c)[0] = sI[0] + sI[1] + sI[2] + sI[3] + sI[4] + sI[5] + sI[6] + sI[7];
     (*c)[1] = sQ[0] + sQ[1] + sQ[2] + sQ[3] + sQ[4] + sQ[5] + sQ[6] + sQ[7];
+#elif defined(NEON) && defined(__ARM_FEATURE_DOTPROD)
+    int32x4_t ysumI = vdupq_n_s32(0);
+    int32x4_t ysumQ = vdupq_n_s32(0);
+    
+    for ( ; i < N - 15; i += 16) {
+        int8x16x2_t ydata = vld2q_s8((const int8_t *)(IQ + i));
+        int8x16x2_t ycode = vld2q_s8((const int8_t *)(code + i));
+        ysumI = vdotq_s32(ysumI, ydata.val[0], ycode.val[0]);
+        ysumQ = vdotq_s32(ysumQ, ydata.val[1], ycode.val[1]);
+    }
+    (*c)[0] = vaddvq_s32(ysumI);
+    (*c)[1] = vaddvq_s32(ysumQ);
 #elif defined(NEON)
     int16x8_t ysumI = vdupq_n_s16(0);
     int16x8_t ysumQ = vdupq_n_s16(0);
