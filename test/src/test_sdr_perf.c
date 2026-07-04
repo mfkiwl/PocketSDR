@@ -1,6 +1,8 @@
 //
 //  Performance measurements for important SDR APIs.
 //
+//  usage: test_sdr_perf [-w fftw_wisdom_file]
+//
 #include "test_sdr.h"
 
 #define NUM_MAIN_N 7
@@ -441,9 +443,22 @@ static void run_psd_cases(void)
 }
 
 // main ------------------------------------------------------------------------
-int main(void)
+int main(int argc, char **argv)
 {
+    const char *fftw_wisdom = "";
     int len_code = 0;
+    
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "-w") && i + 1 < argc) {
+            fftw_wisdom = argv[++i];
+        }
+        else {
+            fprintf(stderr, "usage: test_sdr_perf [-w fftw_wisdom_file]\n");
+            return 1;
+        }
+    }
+    sdr_func_init(fftw_wisdom);
+    
     int8_t *code_I = sdr_gen_code("L1CA", 1, &len_code);
     
     TEST_ASSERT_TRUE(code_I != NULL);
