@@ -44,7 +44,6 @@ P1_COLOR   = '#003020'       # plot color 1
 P2_COLOR   = '#888844'       # plot color 2
 P3_COLOR   = '#BBBBBB'       # plot color 3
 WARN_COLOR = '#FF4000'       # warning color
-FONT_SIZE  = (9, 9)          # font size (sans, mono)
 SDR_N_CORR = (6+101)         # number of correlators
 SDR_N_HIST = 5000            # number of correlator history
 SDR_N_PSD  = 2048            # number FFT points for PSD
@@ -80,6 +79,7 @@ env = platform.platform()
 if 'Windows' in env:
     LIBSDR = AP_DIR + '/../lib/win32/libsdr.so' # UCRT64 DLL
     FONT = ('Tahoma', 'Consolas')
+    FONT_SIZE = (9, 9)
     
     # setup SoapySDR paths (radioconda)
     soapy_dir = os.path.expandvars(r'%USERPROFILE%\radioconda\Library')
@@ -88,6 +88,7 @@ elif 'macOS' in env:
     LIBSDR = AP_DIR + '/../lib/macos/libsdr.so'
     #FONT = ('Arial Narrow', 'Monaco')
     FONT = ('Tahoma', 'Monaco')
+    FONT_SIZE = (12, 12)
     
     # setup SoapySDR paths (radioconda)
     soapy_dir = os.path.expanduser('~/radioconda')
@@ -97,6 +98,7 @@ else: # Linux or Raspberry Pi OS
     FONT = ('DejaVu Sans', 'DejaVu Sans Mono')
     #FONT = ('Noto Sans', 'Noto Sans Mono')
     #FONT = ('Ubuntu', 'Ubuntu Mono')
+    FONT_SIZE = (9, 9)
 
 # load external library
 try:
