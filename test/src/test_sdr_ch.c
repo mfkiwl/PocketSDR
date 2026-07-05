@@ -3,6 +3,8 @@
 //
 #include "test_sdr.h"
 
+#define SQR(x) ((x) * (x))
+
 extern double sdr_t_acq;
 
 // pack signed I/Q values into sdr_cpx8_t --------------------------------------
@@ -221,11 +223,80 @@ static void test_sdr_ch_update_lock_api(void)
     sdr_ch_free(ch);
 }
 
+// test sdr_ch_update() with synthetic L6D/E CSK signal -------------------------
+static void test_ch_update_l6_csk(const char *sig, int prn)
+{
+    static const int shift[] = {0, 1, 2, 3, 5, 37, 128, 254, 255}; // (chips)
+    int n_sym = (int)(sizeof(shift) / sizeof(shift[0]));
+    int len_code = 0, coff_smp = 33;
+    uint32_t lcg = 12345;
+    double fs = 12e6;
+    const int8_t *code = sdr_gen_code(sig, prn, &len_code);
+    sdr_ch_t *ch = sdr_ch_new(sig, prn, fs, 0.0);
+
+    TEST_ASSERT_TRUE(code != NULL);
+    TEST_ASSERT_EQ_INT(20460, len_code);
+    TEST_ASSERT_TRUE(ch != NULL);
+
+    // generate noisy L6D/E CSK IF signal (zero-IF)
+    sdr_buff_t *buff = new_zero_buff(coff_smp + (n_sym + 1) * ch->N);
+    for (int n = coff_smp; n < buff->N; n++) {
+        int m = (n - coff_smp) / ch->N;
+        int j = (n - coff_smp) % ch->N;
+        if (m >= n_sym) m = n_sym - 1;
+        int slot = (int)((double)j * len_code / ch->N);
+        int s = (slot - 2 * shift[m]) % len_code;
+        if (s < 0) s += len_code;
+        lcg = lcg * 1103515245 + 12345;
+        int nI = (int)((lcg >> 24) % 13) - 6; // deterministic noise [-6,6]
+        int nQ = (int)((lcg >> 16) % 13) - 6;
+        buff->data[n] = pack_cpx8(code[s] + nI, nQ); // noise-dominated signal
+    }
+    ch->state = SDR_STATE_LOCK;
+    ch->coff = coff_smp / fs;
+
+    for (int m = 0; m < n_sym; m++) {
+        sdr_ch_update(ch, (m + 1) * ch->T, buff, m * ch->N);
+
+        // decoded CSK symbol
+        uint8_t sym = ch->nav->syms[SDR_MAX_NSYM-1];
+        TEST_ASSERT_EQ_INT(255 - shift[m], sym);
+
+        // EPL correlations of CSK-shifted code
+        double P = sqrt(SQR(ch->trk->C[0][0]) + SQR(ch->trk->C[0][1]));
+        double E = sqrt(SQR(ch->trk->C[1][0]) + SQR(ch->trk->C[1][1]));
+        double L = sqrt(SQR(ch->trk->C[2][0]) + SQR(ch->trk->C[2][1]));
+        TEST_ASSERT_TRUE(P > 0.3);
+        TEST_ASSERT_TRUE(ch->trk->C[0][0] > 0.0f); // in-phase and no flip
+        TEST_ASSERT_TRUE(fabs(ch->trk->C[0][1]) < 0.2 * P);
+        TEST_ASSERT_TRUE(E > 0.4 * P && E < P);
+        TEST_ASSERT_TRUE(L > 0.4 * P && L < P);
+        TEST_ASSERT_TRUE(fabs(E - L) < 0.3 * P);
+
+        if (m == 0) { // emulate L6 frame sync to narrow CSK peak search
+            ch->nav->fsync = ch->lock;
+            ch->nav->coff = -ch->T / 10230; // symbol offset = 0
+        }
+        if (m >= 2) { // code shift reference fixed after frame sync
+            TEST_ASSERT_EQ_INT(255, ch->trk->csk_ref);
+        }
+    }
+    sdr_buff_free(buff);
+    sdr_ch_free(ch);
+}
+
+// test sdr_ch_update() with L6D/L6E CSK signals --------------------------------
+static void test_sdr_ch_update_l6_csk(void)
+{
+    test_ch_update_l6_csk("L6D", 194);
+    test_ch_update_l6_csk("L6E", 204);
+}
+
 // main ------------------------------------------------------------------------
 int main(void)
 {
     sdr_func_init("");
-    
+
     TEST_RUN(test_sdr_ch_new_free_api);
     TEST_RUN(test_sdr_ch_set_corr_api);
     TEST_RUN(test_sdr_ch_corr_stat_api);
@@ -233,6 +304,7 @@ int main(void)
     TEST_RUN(test_sdr_ch_update_idle_api);
     TEST_RUN(test_sdr_ch_update_search_api);
     TEST_RUN(test_sdr_ch_update_lock_api);
-    
+    TEST_RUN(test_sdr_ch_update_l6_csk);
+
     return 0;
 }
