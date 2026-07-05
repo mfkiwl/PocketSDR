@@ -1,8 +1,8 @@
 
-# **Pocket SDR - An Open-Source GNSS SDR,<br> ver. 0.17**
+# **Pocket SDR - An Open-Source GNSS SDR,<br> ver. 0.18**
 
 <div style="text-align: right;">
-<strong>2026-06-17</strong>
+<strong>2026-07-06</strong>
 </div>
 
 ---
@@ -621,5 +621,13 @@ purposes, is prohibited.
   `lost_th` options). Replaced external Viterbi / Reed-Solomon / LDPC decoders
   with internal implementations. Improved the symbol-sync algorithm. Improved
   the `pocket_sdr.py` UI (options Load / Save, etc.).
+- **2026-07-06 (v0.18)**: Reworked the QZSS L6 CSK decoder: chip-domain FFT
+  symbol detection with sampling-rate-independent cost, E/P/L correlations by
+  the standard correlator with the CSK-shifted code (improves L6 pseudorange
+  quality), and a narrowed peak search after frame sync. L6 tracking is 3-8x
+  faster; 8 L6 channels at 24 Msps fit on a Raspberry Pi 5 (see
+  doc/update_csk_decoder.md). Fused carrier wipeoff into the standard and FFT
+  correlators and unified the int8 code banks. Optimized NEON paths for
+  Raspberry Pi 5 (SDOT). Added option `-w` for FFTW wisdom import.
 
 --------------------------------------------------------------------------------
