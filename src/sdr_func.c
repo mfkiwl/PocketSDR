@@ -33,6 +33,9 @@
 //                   modify API sdr_tag_read(), sdr_tag_write()
 //  2026-07-04  1.18 optimize NEON codes in sdr_cpx_mul(), dot_IQ_code()
 //                   add NEON codes in mix_carr(), sdr_lpf_apply()
+//  2026-07-05  1.19 integrate carrier mixing into sdr_corr_std()
+//                   modify API sdr_corr_std()
+//                   change real code bank to 1 byte/sample int8_t
 //
 #include <math.h>
 #include <stdarg.h>
@@ -63,8 +66,11 @@
 #define LPF_H_SHIFT   13    // Q13 coefficient scale (1.0 = 8192)
 #define LPF_N_CHUNK   1024  // LPF chunk size
 
+#define MIX_CORR_CHUNK 4096 // chunk size of fused mix carrier + correlator
+
 #define SQR(x)        ((x) * (x))
 #define MIN(x, y)     ((x) < (y) ? (x) : (y))
+#define MAX(x, y)     ((x) > (y) ? (x) : (y))
 #define ROUND(x)      floor((x) + 0.5)
 #define CLIP(x, lo, hi) ((x) < (lo) ? (lo) : ((x) > (hi) ? (hi) : (x)))
 
@@ -791,14 +797,11 @@ float *sdr_dop_bins(double T, float dop, float max_dop, int *len_fds)
     return fds;
 }
 
-// mix carrier -----------------------------------------------------------------
-static void mix_carr(const sdr_buff_t *buff, int ix, int N, double phi,
-    double step, sdr_cpx16_t *IQ)
+// mix carrier with fixed-point phase and phase step ----------------------------
+static void mix_carr_p(const sdr_buff_t *buff, int ix, int N, uint32_t p,
+    uint32_t s, sdr_cpx16_t *IQ)
 {
     const uint8_t *data = buff->data + ix;
-    double scale = (double)(1 << 24) * NTBL;
-    uint32_t p = (uint32_t)((phi - floor(phi)) * scale);
-    uint32_t s = (uint32_t)(int)(step * scale);
     int i = 0;
 #if defined(AVX2)
     __m256i yp = _mm256_set_epi32(p+s*7, p+s*6, p+s*5, p+s*4, p+s*3, p+s*2, p+s, p);
@@ -854,6 +857,17 @@ static void mix_carr(const sdr_buff_t *buff, int ix, int N, double phi,
     }
 }
 
+// mix carrier -----------------------------------------------------------------
+static void mix_carr(const sdr_buff_t *buff, int ix, int N, double phi,
+    double step, sdr_cpx16_t *IQ)
+{
+    double scale = (double)(1 << 24) * NTBL;
+    uint32_t p = (uint32_t)((phi - floor(phi)) * scale);
+    uint32_t s = (uint32_t)(int)(step * scale);
+    
+    mix_carr_p(buff, ix, N, p, s, IQ);
+}
+
 //------------------------------------------------------------------------------
 //  Mix IF carrier to IF data.
 //
@@ -883,14 +897,22 @@ void sdr_mix_carr(const sdr_buff_t *buff, int ix, int N, double fs, double fc,
     }
 }
 
-// mix carrier for complex buffer (for python) ---------------------------------
-static void mix_carr_cpx(const sdr_cpx_t *buff, int len_buff, int ix, int N,
-    double fs, double fc, double phi, sdr_cpx16_t *IQ)
+// convert complex buffer to IF data buffer (for python) ------------------------
+static sdr_buff_t *buff_new_cpx(const sdr_cpx_t *buff, int len_buff, int ix,
+    int N)
 {
     sdr_buff_t *buff_cpx8 = sdr_buff_new(N, 2);
     for (int i = 0, j = ix; i < N; i++, j = (j + 1) % len_buff) {
         buff_cpx8->data[i] = SDR_CPX8((int8_t)buff[j][0], (int8_t)buff[j][1]);
     }
+    return buff_cpx8;
+}
+
+// mix carrier for complex buffer (for python) ---------------------------------
+static void mix_carr_cpx(const sdr_cpx_t *buff, int len_buff, int ix, int N,
+    double fs, double fc, double phi, sdr_cpx16_t *IQ)
+{
+    sdr_buff_t *buff_cpx8 = buff_new_cpx(buff, len_buff, ix, N);
     mix_carr(buff_cpx8, 0, N, phi, fc / fs, IQ);
     sdr_buff_free(buff_cpx8);
 }
@@ -905,12 +927,11 @@ static void mix_carr_cpx(const sdr_cpx_t *buff, int len_buff, int ix, int N,
 }
 #endif
 
-// inner product of IQ data and code -------------------------------------------
-static void dot_IQ_code(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code, int N,
-    float s, sdr_cpx_t *c)
+// accumulate inner product of IQ data and code ---------------------------------
+static void dot_IQ_code_acc(const sdr_cpx16_t *IQ, const int8_t *code,
+    int N, int32_t *sumI, int32_t *sumQ)
 {
     int i = 0;
-    (*c)[0] = (*c)[1] = 0.0f;
 #if defined(AVX2)
     __m256i ysumI = _mm256_setzero_si256();
     __m256i ysumQ = _mm256_setzero_si256();
@@ -919,10 +940,14 @@ static void dot_IQ_code(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code, int N,
     __m256i yextQ = _mm256_set_epi8(1,0,1,0,1,0,1,0, 1,0,1,0,1,0,1,0,
         1,0,1,0,1,0,1,0, 1,0,1,0,1,0,1,0);
     __m256i yones = _mm256_set1_epi16(1);
+    __m256i ydup = _mm256_setr_epi8(0,0,1,1,2,2,3,3, 4,4,5,5,6,6,7,7,
+        8,8,9,9,10,10,11,11, 12,12,13,13,14,14,15,15);
     
     for ( ; i < N - 15; i += 16) {
         __m256i ydata = _mm256_loadu_si256((__m256i *)(IQ + i));
-        __m256i ycode = _mm256_loadu_si256((__m256i *)(code + i)); // {-1,0,1}
+        __m256i ycode8 = _mm256_broadcastsi128_si256(
+            _mm_loadu_si128((const __m128i *)(code + i))); // {-1,0,1}
+        __m256i ycode = _mm256_shuffle_epi8(ycode8, ydup); // I=Q interleaved
         __m256i ycorr = _mm256_sign_epi8(ydata, ycode); // IQ * code
         __m256i ycorrI = _mm256_maddubs_epi16(yextI, ycorr);
         __m256i ycorrQ = _mm256_maddubs_epi16(yextQ, ycorr);
@@ -932,43 +957,41 @@ static void dot_IQ_code(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code, int N,
     int32_t sI[8], sQ[8];
     _mm256_storeu_si256((__m256i *)sI, ysumI);
     _mm256_storeu_si256((__m256i *)sQ, ysumQ);
-    (*c)[0] = sI[0] + sI[1] + sI[2] + sI[3] + sI[4] + sI[5] + sI[6] + sI[7];
-    (*c)[1] = sQ[0] + sQ[1] + sQ[2] + sQ[3] + sQ[4] + sQ[5] + sQ[6] + sQ[7];
+    *sumI += sI[0] + sI[1] + sI[2] + sI[3] + sI[4] + sI[5] + sI[6] + sI[7];
+    *sumQ += sQ[0] + sQ[1] + sQ[2] + sQ[3] + sQ[4] + sQ[5] + sQ[6] + sQ[7];
 #elif defined(NEON) && defined(__ARM_FEATURE_DOTPROD)
     int32x4_t ysumI = vdupq_n_s32(0);
     int32x4_t ysumQ = vdupq_n_s32(0);
     
     for ( ; i < N - 15; i += 16) {
         int8x16x2_t ydata = vld2q_s8((const int8_t *)(IQ + i));
-        int8x16x2_t ycode = vld2q_s8((const int8_t *)(code + i));
-        ysumI = vdotq_s32(ysumI, ydata.val[0], ycode.val[0]);
-        ysumQ = vdotq_s32(ysumQ, ydata.val[1], ycode.val[1]);
+        int8x16_t ycode = vld1q_s8(code + i); // {-1,0,1}, I=Q
+        ysumI = vdotq_s32(ysumI, ydata.val[0], ycode);
+        ysumQ = vdotq_s32(ysumQ, ydata.val[1], ycode);
     }
-    (*c)[0] = vaddvq_s32(ysumI);
-    (*c)[1] = vaddvq_s32(ysumQ);
+    *sumI += vaddvq_s32(ysumI);
+    *sumQ += vaddvq_s32(ysumQ);
 #elif defined(NEON)
     int16x8_t ysumI = vdupq_n_s16(0);
     int16x8_t ysumQ = vdupq_n_s16(0);
     
     for ( ; i < N - 7; i += 8) {
         int8x8x2_t ydata = vld2_s8((int8_t *)(IQ + i));
-        int8x8x2_t ycode = vld2_s8((int8_t *)(code + i));
-        ysumI = vmlal_s8(ysumI, ydata.val[0], ycode.val[0]);
-        ysumQ = vmlal_s8(ysumQ, ydata.val[1], ycode.val[1]);
+        int8x8_t ycode = vld1_s8(code + i); // {-1,0,1}, I=Q
+        ysumI = vmlal_s8(ysumI, ydata.val[0], ycode);
+        ysumQ = vmlal_s8(ysumQ, ydata.val[1], ycode);
         if (i % (8 * 256) == 0) {
-            sum_s16(ysumI, (*c)[0])
-            sum_s16(ysumQ, (*c)[1])
+            sum_s16(ysumI, *sumI)
+            sum_s16(ysumQ, *sumQ)
         }
     }
-    sum_s16(ysumI, (*c)[0])
-    sum_s16(ysumQ, (*c)[1])
+    sum_s16(ysumI, *sumI)
+    sum_s16(ysumQ, *sumQ)
 #endif
     for ( ; i < N; i++) {
-        (*c)[0] += IQ[i].I * code[i].I;
-        (*c)[1] += IQ[i].Q * code[i].Q;
+        *sumI += IQ[i].I * code[i];
+        *sumQ += IQ[i].Q * code[i];
     }
-    (*c)[0] *= s * SDR_CSCALE;
-    (*c)[1] *= s * SDR_CSCALE;
 }
 
 // inner product of IQ data and complex code -----------------------------------
@@ -1016,14 +1039,18 @@ static void dot_IQ_cpx_code(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code,
 }
 
 //------------------------------------------------------------------------------
-//  Standard correlator. Make multiple correlations between IF-carrier-mixed IF
-//  data and resampled spreading codes. The shifts of the spreading codes are
-//  specified as pos in unit of samples. 
+//  Standard correlator. Mix IF carrier to IF data and make multiple
+//  correlations with resampled spreading codes in a single fused pass. The
+//  shifts of the spreading codes are specified as pos in unit of samples.
 //
 //  args:
-//      IQ       (I) IF-carrier-mixed IF data as sdr_cpx_16_t array (N x 1)
+//      buff     (I) IF data buffer
+//      ix       (I) start index of IF data in IF data buffer
+//      N        (I) length of IF data
+//      fs       (I) IF data sampling frequency (Hz)
+//      fc       (I) IF carrier frequency (Hz)
+//      phi      (I) IF carrier phase offset (cyc)
 //      code     (I) resampled code bank (N x SDR_N_CODES)
-//      N        (I) size of IQ and code
 //      coff     (I) code offset (samples)
 //      pos      (I) correlator shift positions (n x 1) (samples)
 //      n        (I) size of pos (number of correlators)
@@ -1035,21 +1062,61 @@ static void dot_IQ_cpx_code(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code,
 //
 //  notes:
 //      The value of spreading codes shall be -1, 0 or 1.
-//      A imaginary part of spreading codes shall be the same as the real part
-//      to optimize computation efficiency.
+//      The code bank is stored as int8_t (1 byte/sample, I=Q implied).
 //
-void sdr_corr_std(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code, int N,
-    double coff, const double *pos, int n, sdr_cpx_t *corr, sdr_cpx_t *C)
+void sdr_corr_std(const sdr_buff_t *buff, int ix, int N, double fs,
+    double fc, double phi, const int8_t *code, double coff,
+    const double *pos, int n, sdr_cpx_t *corr, sdr_cpx_t *C)
 {
+    sdr_cpx16_t IQ[MIX_CORR_CHUNK];
     sdr_cpx_t corr1[SDR_MAX_CORR], corr2[SDR_MAX_CORR];
+    int32_t s1I[SDR_MAX_CORR] = {0}, s1Q[SDR_MAX_CORR] = {0};
+    int32_t s2I[SDR_MAX_CORR] = {0}, s2Q[SDR_MAX_CORR] = {0};
+    const int8_t *slice[SDR_MAX_CORR];
+    int js[SDR_MAX_CORR];
     float dot_EPL = 0.0, sign;
+    double scale = (double)(1 << 24) * NTBL;
+    uint32_t p0 = (uint32_t)((phi - floor(phi)) * scale);
+    uint32_t sp = (uint32_t)(int)(fc / fs * scale);
     
     for (int i = 0; i < n; i++) {
         double p = coff + pos[i];
         int j = (int)floor(p), k = (int)((p - j) * SDR_N_CODES);
         if (j < 0) j += N; else if (j >= N) j -= N;
-        dot_IQ_code(IQ, code + k * N + N - j, j, 1.0, corr1 + i);
-        dot_IQ_code(IQ + j, code + k * N, N - j, 1.0, corr2 + i);
+        js[i] = j;
+        slice[i] = code + k * N;
+    }
+    for (int c0 = 0; c0 < N; c0 += MIX_CORR_CHUNK) {
+        int len = MIN(MIX_CORR_CHUNK, N - c0);
+        int ix2 = (ix + c0) % buff->N;
+        uint32_t p = p0 + sp * (uint32_t)c0;
+        
+        // mix carrier of the chunk
+        if (ix2 + len <= buff->N) {
+            mix_carr_p(buff, ix2, len, p, sp, IQ);
+        } else { // across IF buffer boundary
+            int m = buff->N - ix2;
+            mix_carr_p(buff, ix2, m, p, sp, IQ);
+            mix_carr_p(buff, 0, len - m, p + sp * (uint32_t)m, sp, IQ + m);
+        }
+        // accumulate correlations before and after the code wrap-around
+        for (int i = 0; i < n; i++) {
+            int j = js[i], a1 = MIN(c0 + len, j), b0 = MAX(c0, j);
+            if (a1 > c0) {
+                dot_IQ_code_acc(IQ, slice[i] + N - j + c0, a1 - c0,
+                    s1I + i, s1Q + i);
+            }
+            if (b0 < c0 + len) {
+                dot_IQ_code_acc(IQ + b0 - c0, slice[i] + b0 - j,
+                    c0 + len - b0, s2I + i, s2Q + i);
+            }
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        corr1[i][0] = s1I[i] * SDR_CSCALE;
+        corr1[i][1] = s1Q[i] * SDR_CSCALE;
+        corr2[i][0] = s2I[i] * SDR_CSCALE;
+        corr2[i][1] = s2Q[i] * SDR_CSCALE;
     }
     // detect polarity flip
     for (int i = 0; i < 3; i++) {
@@ -1122,13 +1189,14 @@ void sdr_corr_std_cpx(const sdr_cpx_t *buff, int len_buff, int ix, int N,
     int n, sdr_cpx_t *corr)
 {
     sdr_cpx_t C[2];
-    sdr_cpx16_t *IQ = (sdr_cpx16_t *)sdr_malloc(sizeof(sdr_cpx16_t) * N * 2);
-    mix_carr_cpx(buff, len_buff, ix, N, fs, fc, phi, IQ);
+    sdr_buff_t *buff_cpx8 = buff_new_cpx(buff, len_buff, ix, N);
+    int8_t *code_res = (int8_t *)sdr_malloc(sizeof(int8_t) * N);
     for (int i = 0; i < N; i++) {
-        IQ[N+i].I = IQ[N+i].Q = (int8_t)code[i];
+        code_res[i] = (int8_t)code[i];
     }
-    sdr_corr_std(IQ, IQ + N, N, 0.0, pos, n, corr, C);
-    sdr_free(IQ);
+    sdr_corr_std(buff_cpx8, 0, N, fs, fc, phi, code_res, 0.0, pos, n, corr, C);
+    sdr_free(code_res);
+    sdr_buff_free(buff_cpx8);
 }
 
 //------------------------------------------------------------------------------
