@@ -134,6 +134,8 @@ SRC_test_sdr_pvt      = $(SRC)/sdr_pvt.c $(SRC)/sdr_func.c \
                         $(STUB_RCV) $(SRC)/sdr_cmn.c
 SRC_test_sdr_perf     = $(SRC)/sdr_func.c $(SRC)/sdr_code.c \
                         $(SRC)/sdr_code_gal.c $(SRC)/sdr_array.c \
+                        $(SRC)/sdr_ch.c $(SRC)/sdr_nav.c $(SRC)/sdr_fec.c \
+                        $(SRC)/sdr_ldpc.c $(SRC)/sdr_nb_ldpc.c \
                         $(SRC)/sdr_cmn.c
 SRC_test_sdr_rcv      = $(SRC)/sdr_rcv.c $(SRC)/sdr_ch.c $(SRC)/sdr_nav.c \
                         $(SRC)/sdr_code.c $(SRC)/sdr_code_gal.c \
