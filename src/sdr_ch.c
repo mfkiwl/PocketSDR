@@ -20,6 +20,7 @@
 //  2025-11-19  1.12 improve carrier-phase coherency
 //  2026-05-02  1.13 support E5 AltBOC
 //  2026-06-15  1.14 update loss-of-lock detection logic
+//  2026-07-05  1.15 use fused mix carrier and standard correlator
 //
 #include <ctype.h>
 #include <math.h>
@@ -180,12 +181,12 @@ static sdr_cpx16_t *gen_e5abq_banks(int prn, double T, double fs, int N)
 static const sdr_cpx16_t *select_e5abq_bank(sdr_ch_t *ch)
 {
     if (ch->trk->sec_sync <= 0) {
-        return ch->trk->code; // bank 1
+        return ch->trk->code_cpx; // bank 1
     }
     int N1 = ch->len_sec_code, N2 = ch->len_sec_code2;
     int idx = (ch->lock - ch->trk->sec_sync + N1) % N1;
     int bank = ch->sec_code[idx] * ch->sec_code2[idx%N2] > 0 ? 1 : 2; // bank 2/3
-    return ch->trk->code + bank * ch->N * SDR_N_CODES;
+    return ch->trk->code_cpx + bank * ch->N * SDR_N_CODES;
 }
 
 // new signal acquisition ------------------------------------------------------
@@ -261,15 +262,19 @@ static sdr_trk_t *trk_new(const char *sig, int prn, const int8_t *code,
                 trk->code_fft + i * N);
         }
     } else if (!strcmp(sig, "E5ABQ")) {
-        trk->code = gen_e5abq_banks(prn, T, fs, N);
+        trk->code_cpx = gen_e5abq_banks(prn, T, fs, N);
     } else {
-        trk->code = (sdr_cpx16_t *)sdr_malloc(sizeof(sdr_cpx16_t) * N *
-            SDR_N_CODES);
+        trk->code = (int8_t *)sdr_malloc(sizeof(int8_t) * N * SDR_N_CODES);
+        sdr_cpx16_t *tmp = (sdr_cpx16_t *)sdr_malloc(sizeof(sdr_cpx16_t) * N);
         for (int i = 0; i < SDR_N_CODES; i++) {
             double coff = -i / fs / SDR_N_CODES;
-            sdr_cpx16_t *p = trk->code + i * N;
-            sdr_res_code(code, NULL, len_code, T, coff, fs, N, 0, p);
+            int8_t *p = trk->code + i * N;
+            sdr_res_code(code, NULL, len_code, T, coff, fs, N, 0, tmp);
+            for (int s = 0; s < N; s++) {
+                p[s] = tmp[s].I;
+            }
         }
+        sdr_free(tmp);
     }
     return trk;
 }
@@ -279,6 +284,7 @@ static void trk_free(sdr_trk_t *trk)
 {
     if (!trk) return;
     sdr_free(trk->code);
+    sdr_free(trk->code_cpx);
     sdr_cpx_free(trk->code_fft);
     sdr_free(trk);
 }
@@ -721,17 +727,17 @@ static void track_sig(sdr_ch_t *ch, double time, const sdr_buff_t *buff, int ix)
     } else {
         sdr_cpx_t C1[2];
         
-        // mix carrier
-        sdr_mix_carr(buff, ix, ch->N, ch->fs, fc, ch->phi, ch->data);
-        
-        // standard correlator
         if (!strcmp(ch->sig, "E5ABQ")) {
+            // mix carrier and standard correlator with complex codes
+            sdr_mix_carr(buff, ix, ch->N, ch->fs, fc, ch->phi, ch->data);
             sdr_corr_std_cpx_code(ch->data, select_e5abq_bank(ch), ch->N,
                 ch->coff * ch->fs, ch->trk->pos,
                 ch->trk->npos + ch->trk->nposx, ch->trk->C, C1);
         } else {
-            sdr_corr_std(ch->data, ch->trk->code, ch->N, ch->coff * ch->fs,
-                ch->trk->pos, ch->trk->npos + ch->trk->nposx, ch->trk->C, C1);
+            // standard correlator (carrier mixing fused)
+            sdr_corr_std(buff, ix, ch->N, ch->fs, fc, ch->phi, ch->trk->code,
+                ch->coff * ch->fs, ch->trk->pos,
+                ch->trk->npos + ch->trk->nposx, ch->trk->C, C1);
         }
         for (int i = 0; i < 2; i++) {
             C1[0][i] = (C1[0][i] + ch->trk->C1[i]) / ch->N;
