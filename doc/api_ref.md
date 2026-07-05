@@ -187,7 +187,7 @@ This API reference describes the **Pocket SDR** C library (`libsdr`). The librar
 <br><br>
 
 - `sdr_trk_t`
-  - Tracking state: correlator positions and complex outputs; P history (`SDR_N_HIST`); secondary code sync/polarity; phase / code error; accumulators for DLL/PLL; resampled code and code FFT.
+  - Tracking state: correlator positions and complex outputs; P history (`SDR_N_HIST`); secondary code sync/polarity; phase / code error; accumulators for DLL/PLL; resampled real code bank (`int8_t`), complex code bank (E5ABQ) and code FFT.
 <br><br>
 
 - `sdr_nav_t`
@@ -681,14 +681,14 @@ General DSP and bookkeeping helpers: complex/FFT primitives, IF buffer / file I/
 - **Return**: heap-allocated float array (free with `sdr_free()`)
 <br><br>
 
-**`void sdr_corr_std(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code, int N, double coff, const double *pos, int n, sdr_cpx_t *corr, sdr_cpx_t *C)`**
+**`void sdr_corr_std(const sdr_buff_t *buff, int ix, int N, double fs, double fc, double phi, const int8_t *code, double coff, const double *pos, int n, sdr_cpx_t *corr, sdr_cpx_t *C)`**
 <br>
-- **Description**: Standard time-domain correlator (real-code) for `n` correlator positions; writes outputs to `C[0..n-1]`. `corr` is the per-sample running buffer.
+- **Description**: Standard time-domain correlator with fused carrier wipeoff. Mixes the carrier (`fc`, `phi`) and correlates against the real-code replicas in a single chunked pass over `buff[ix..ix+N)`, without an intermediate baseband buffer. `code` is the resampled code bank (`N x SDR_N_CODES`, `int8_t` values -1/0/1, I=Q implied). Writes `n` correlations to `corr` and the pre/post code-wrap prompt correlations to `C[0..1]` (bit-transition handling).
 <br><br>
 
 **`void sdr_corr_std_cpx_code(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code, int N, double coff, const double *pos, int n, sdr_cpx_t *corr, sdr_cpx_t *C)`**
 <br>
-- **Description**: Time-domain correlator with complex code (e.g., L6/E6 BCH).
+- **Description**: Time-domain correlator with complex code (`sdr_cpx16_t` replicas, E5ABQ) on IF-carrier-mixed samples.
 <br><br>
 
 **`void sdr_corr_std_cpx(const sdr_cpx_t *buff, int len_buff, int ix, int N, double fs, double fc, double phi, const float *code, const double *pos, int n, sdr_cpx_t *corr)`**
