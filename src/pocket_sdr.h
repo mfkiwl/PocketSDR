@@ -157,24 +157,25 @@ typedef struct {                // SoapySDR device type
     sdr_mutex_t mtx;            // lock flag
 } sdr_sdev_t;
 
-typedef struct {                // signal acquisition type 
-    sdr_cpx_t *code_fft;        // code FFT 
-    float *fds;                 // Doppler bins 
-    int len_fds;                // length of Doppler bins 
+typedef struct {                // signal acquisition type
+    sdr_cpx_t *code_fft;        // code FFT
+    float *fds;                 // Doppler bins
+    int len_fds;                // length of Doppler bins
     float fd_ext;               // Doppler external assist (Hz, 0=none)
     int fd_ext_n;               // number of Doppler bins for fd_ext (0=3)
-    float *P_sum;               // sum of correlation powers 
-    int n_sum;                  // number of sum 
+    float *P_sum;               // sum of correlation powers
+    int n_sum;                  // number of sum
 } sdr_acq_t;
 
-typedef struct {                // signal tracking type 
+typedef struct {                // signal tracking type
     int npos, nposx;            // number of correlator positions
     double pos[SDR_MAX_CORR];   // correlator positions (samples)
-    sdr_cpx_t C[SDR_MAX_CORR];  // correlations 
+    sdr_cpx_t C[SDR_MAX_CORR];  // correlations
     sdr_cpx_t C0, C1;           // correlation buffers
-    sdr_cpx_t P[SDR_N_HIST];    // history of P correlations 
-    int sec_sync;               // secondary code sync status 
-    int sec_pol;                // secondary code polarity 
+    sdr_cpx_t P[SDR_N_HIST];    // history of P correlations
+    int sec_sync;               // secondary code sync status
+    int sec_pol;                // secondary code polarity
+    int csk_ref;                // L6 CSK code shift reference (chips) (-1:unset)
     double err_phas;            // phase error (cyc)
     double err_code;            // code error (chip)
     double phas_acc;            // 3rd-order PLL acceleration accumulator (Hz/s)
@@ -203,26 +204,26 @@ typedef struct {                // SDR receiver navigation data type
     int count[2];               // navigation data count (OK, error)
 } sdr_nav_t;
 
-typedef struct {                // SDR receiver channel type 
+typedef struct {                // SDR receiver channel type
     int no;                     // channel number
     int rf_ch;                  // RF channel
     int sig_srch;               // signal search flag
-    int state;                  // channel state 
-    double time;                // receiver time 
-    char sat[16];               // satellite ID 
-    char sig[16];               // signal ID 
-    int prn;                    // PRN number 
-    const int8_t *code;         // primary code 
+    int state;                  // channel state
+    double time;                // receiver time
+    char sat[16];               // satellite ID
+    char sig[16];               // signal ID
+    int prn;                    // PRN number
+    const int8_t *code;         // primary code
     const int8_t *sec_code;     // secondary code
     const int8_t *sec_code2;    // secondary code 2
     int len_code, len_sec_code, len_sec_code2;
-    double fc;                  // carrier frequency (Hz) 
-    double fs;                  // sampling rate (sps) 
-    double fi;                  // IF frequency (Hz) 
-    double T;                   // code cycle (s) 
-    int N;                      // code cycle (samples) 
-    double fd;                  // Doppler frequency (Hz) 
-    double coff;                // code offset (s) 
+    double fc;                  // carrier frequency (Hz)
+    double fs;                  // sampling rate (sps)
+    double fi;                  // IF frequency (Hz)
+    double T;                   // code cycle (s)
+    int N;                      // code cycle (samples)
+    double fd;                  // Doppler frequency (Hz)
+    double coff;                // code offset (s)
     double phi;                 // carrier phase (cyc)
     double adr;                 // accumulated Doppler range (cyc)
     double cn0;                 // C/N0 (dB-Hz)
@@ -232,10 +233,10 @@ typedef struct {                // SDR receiver channel type
     int lock, lost;             // lock and lost counts
     int lost_cnt;               // lost decision counter (C/N0/PLI windows)
     int pli_valid;              // PLI valid flag (0: before first C/N0 window)
-    int costas;                 // Costas PLL flag 
+    int costas;                 // Costas PLL flag
     int obs_idx;                // observation data index
-    sdr_acq_t *acq;             // signal acquisition 
-    sdr_trk_t *trk;             // signal tracking 
+    sdr_acq_t *acq;             // signal acquisition
+    sdr_trk_t *trk;             // signal tracking
     sdr_nav_t *nav;             // navigation decoder
     sdr_cpx16_t *data;          // data buffer
     sdr_cpx_t *corr;            // correlation buffer
@@ -417,20 +418,22 @@ double sdr_shift_freq(const char *sig, int fcn, double fi);
 float *sdr_dop_bins(double T, float dop, float max_dop, int *len_fds);
 void sdr_corr_std(const sdr_buff_t *buff, int ix, int N, double fs,
     double fc, double phi, const int8_t *code, double coff,
-    const double *pos, int n, sdr_cpx_t *corr, sdr_cpx_t *C);
+    const double *pos, int n, int pol, sdr_cpx_t *corr, sdr_cpx_t *C);
 void sdr_corr_std_cpx_code(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code,
     int N, double coff, const double *pos, int n, sdr_cpx_t *corr,
     sdr_cpx_t *C);
 void sdr_corr_std_cpx(const sdr_cpx_t *buff, int len_buff, int ix, int N,
     double fs, double fc, double phi, const float *code, const double *pos,
     int n, sdr_cpx_t *corr);
-void sdr_corr_fft(const sdr_cpx16_t *IQ, const sdr_cpx_t *code_fft, int N,
-    sdr_cpx_t *corr);
+void sdr_corr_fft(const sdr_buff_t *buff, int ix, int N, double fs,
+    double fc, double phi, const sdr_cpx_t *code_fft, sdr_cpx_t *corr);
 void sdr_corr_fft_cpx(const sdr_cpx_t *buff, int len_buff, int ix, int N,
     double fs, double fc, double phi, const sdr_cpx_t *code_fft,
     sdr_cpx_t *corr);
 void sdr_mix_carr(const sdr_buff_t *buff, int ix, int N, double fs, double fc,
     double phi, sdr_cpx16_t *IQ);
+void sdr_bin_csk(const sdr_cpx16_t *IQ, int N, int len_code, int slot,
+    double coff, sdr_cpx_t *bins);
 void sdr_psd_cpx(const sdr_cpx_t *buff, int len_buff, int N, double fs, int IQ,
     float *psd);
 stream_t *sdr_str_open(const char *path);
