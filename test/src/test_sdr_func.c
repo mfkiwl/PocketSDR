@@ -222,7 +222,7 @@ static void test_sdr_corr_api(void)
         }
     }
     
-    sdr_corr_std(buff, 0, N, 4.0, 0.0, 0.0, code, 0.0, pos, npos, corr, C);
+    sdr_corr_std(buff, 0, N, 4.0, 0.0, 0.0, code, 0.0, pos, npos, 0, corr, C);
     TEST_ASSERT_TRUE(isfinite(corr[0][0]));
     TEST_ASSERT_TRUE(isfinite(corr[0][1]));
 
@@ -234,7 +234,7 @@ static void test_sdr_corr_api(void)
         corr);
     TEST_ASSERT_TRUE(isfinite(corr[0][0]));
     
-    sdr_corr_fft(IQ, code_fft, N, corr_fft);
+    sdr_corr_fft(buff, 0, N, 4.0, 0.0, 0.0, code_fft, corr_fft);
     for (int i = 0; i < N; i++) {
         TEST_ASSERT_NEAR(0.0, corr_fft[i][0], 1e-6);
         TEST_ASSERT_NEAR(0.0, corr_fft[i][1], 1e-6);
@@ -314,7 +314,8 @@ static void test_sdr_corr_std_equiv(void)
     }
     // without IF buffer wrap-around
     ref_corr_std(buff, 100, N, fs, fc, phi, code, coff, pos, npos, corr1, C1);
-    sdr_corr_std(buff, 100, N, fs, fc, phi, code, coff, pos, npos, corr2, C2);
+    sdr_corr_std(buff, 100, N, fs, fc, phi, code, coff, pos, npos, 0, corr2,
+        C2);
     for (int i = 0; i < npos; i++) {
         TEST_ASSERT_NEAR(corr1[i][0], corr2[i][0], 1e-9);
         TEST_ASSERT_NEAR(corr1[i][1], corr2[i][1], 1e-9);
@@ -325,7 +326,8 @@ static void test_sdr_corr_std_equiv(void)
     }
     // across IF buffer wrap-around (phase re-quantized at the boundary)
     ref_corr_std(buff, 8000, N, fs, fc, phi, code, coff, pos, npos, corr1, C1);
-    sdr_corr_std(buff, 8000, N, fs, fc, phi, code, coff, pos, npos, corr2, C2);
+    sdr_corr_std(buff, 8000, N, fs, fc, phi, code, coff, pos, npos, 0, corr2,
+        C2);
     for (int i = 0; i < npos; i++) {
         TEST_ASSERT_NEAR(corr1[i][0], corr2[i][0], 1e-3);
         TEST_ASSERT_NEAR(corr1[i][1], corr2[i][1], 1e-3);
