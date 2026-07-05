@@ -196,7 +196,8 @@ static void test_sdr_mix_carr_api(void)
 static void test_sdr_corr_api(void)
 {
     const int N = 4, npos = 3;
-    sdr_cpx16_t IQ[4], code[4 * SDR_N_CODES];
+    sdr_cpx16_t IQ[4], code_cpx[4 * SDR_N_CODES];
+    int8_t code[4 * SDR_N_CODES];
     sdr_cpx_t corr[4], C[2], code_fft[4];
     sdr_cpx_t cbuff[4], corr_fft[4];
     double pos[3] = {0.0, 1.0, -1.0};
@@ -215,16 +216,17 @@ static void test_sdr_corr_api(void)
     }
     for (int k = 0; k < SDR_N_CODES; k++) {
         for (int i = 0; i < N; i++) {
-            code[k*N+i].I = 1;
-            code[k*N+i].Q = 1;
+            code[k*N+i] = 1;
+            code_cpx[k*N+i].I = 1;
+            code_cpx[k*N+i].Q = 1;
         }
     }
     
-    sdr_corr_std(IQ, code, N, 0.0, pos, npos, corr, C);
+    sdr_corr_std(buff, 0, N, 4.0, 0.0, 0.0, code, 0.0, pos, npos, corr, C);
     TEST_ASSERT_TRUE(isfinite(corr[0][0]));
     TEST_ASSERT_TRUE(isfinite(corr[0][1]));
-    
-    sdr_corr_std_cpx_code(IQ, code, N, 0.0, pos, npos, corr, C);
+
+    sdr_corr_std_cpx_code(IQ, code_cpx, N, 0.0, pos, npos, corr, C);
     TEST_ASSERT_TRUE(isfinite(corr[0][0]));
     TEST_ASSERT_TRUE(isfinite(corr[0][1]));
     
@@ -246,6 +248,89 @@ static void test_sdr_corr_api(void)
         TEST_ASSERT_TRUE(isfinite(P[i]));
         TEST_ASSERT_NEAR(1.0, P[i], 1e-6);
     }
+    sdr_buff_free(buff);
+}
+
+// reference standard correlator (mix carrier + scalar correlations) -----------
+static void ref_corr_std(const sdr_buff_t *buff, int ix, int N, double fs,
+    double fc, double phi, const int8_t *code, double coff, const double *pos,
+    int n, sdr_cpx_t *corr, sdr_cpx_t *C)
+{
+    sdr_cpx16_t *IQ = (sdr_cpx16_t *)sdr_malloc(sizeof(sdr_cpx16_t) * N);
+    sdr_cpx_t corr1[SDR_MAX_CORR], corr2[SDR_MAX_CORR];
+    float dot_EPL = 0.0, sign;
+    
+    sdr_mix_carr(buff, ix, N, fs, fc, phi, IQ);
+    for (int i = 0; i < n; i++) {
+        double p = coff + pos[i];
+        int j = (int)floor(p), k = (int)((p - j) * SDR_N_CODES);
+        if (j < 0) j += N; else if (j >= N) j -= N;
+        const int8_t *c = code + k * N;
+        int32_t s1I = 0, s1Q = 0, s2I = 0, s2Q = 0;
+        for (int s = 0; s < j; s++) {
+            s1I += IQ[s].I * c[N-j+s];
+            s1Q += IQ[s].Q * c[N-j+s];
+        }
+        for (int s = j; s < N; s++) {
+            s2I += IQ[s].I * c[s-j];
+            s2Q += IQ[s].Q * c[s-j];
+        }
+        corr1[i][0] = s1I * SDR_CSCALE;
+        corr1[i][1] = s1Q * SDR_CSCALE;
+        corr2[i][0] = s2I * SDR_CSCALE;
+        corr2[i][1] = s2Q * SDR_CSCALE;
+    }
+    for (int i = 0; i < 3; i++) {
+        dot_EPL += corr1[i][0] * corr2[i][0] + corr1[i][1] * corr2[i][1];
+    }
+    sign = dot_EPL < 0.0f ? -1.0f : 1.0f;
+    
+    for (int i = 0; i < n; i++) {
+        corr[i][0] = (corr1[i][0] + sign * corr2[i][0]) / N;
+        corr[i][1] = (corr1[i][1] + sign * corr2[i][1]) / N;
+    }
+    for (int i = 0; i < 2; i++) {
+        C[0][i] = corr1[0][i];
+        C[1][i] = corr2[0][i];
+    }
+    sdr_free(IQ);
+}
+
+// sdr_corr_std() vs reference implementation ----------------------------------
+static void test_sdr_corr_std_equiv(void)
+{
+    const int N = 9000, npos = 4;
+    sdr_buff_t *buff = sdr_buff_new(12000, 2);
+    int8_t *code = (int8_t *)sdr_malloc(sizeof(int8_t) * N * SDR_N_CODES);
+    sdr_cpx_t corr1[4], corr2[4], C1[2], C2[2];
+    double pos[4] = {0.0, -3.3, 3.3, 7.7};
+    double fs = 12e6, fc = 4250.0, phi = 0.678, coff = 2.5;
+    
+    for (int i = 0; i < buff->N; i++) {
+        buff->data[i] = pack_cpx8(i % 7 - 3, 3 - i % 5);
+    }
+    for (int i = 0; i < N * SDR_N_CODES; i++) {
+        code[i] = (int8_t)(i % 5 == 0 ? 0 : (i % 2 ? -1 : 1));
+    }
+    // without IF buffer wrap-around
+    ref_corr_std(buff, 100, N, fs, fc, phi, code, coff, pos, npos, corr1, C1);
+    sdr_corr_std(buff, 100, N, fs, fc, phi, code, coff, pos, npos, corr2, C2);
+    for (int i = 0; i < npos; i++) {
+        TEST_ASSERT_NEAR(corr1[i][0], corr2[i][0], 1e-9);
+        TEST_ASSERT_NEAR(corr1[i][1], corr2[i][1], 1e-9);
+    }
+    for (int i = 0; i < 2; i++) {
+        TEST_ASSERT_NEAR(C1[0][i], C2[0][i], 1e-9);
+        TEST_ASSERT_NEAR(C1[1][i], C2[1][i], 1e-9);
+    }
+    // across IF buffer wrap-around (phase re-quantized at the boundary)
+    ref_corr_std(buff, 8000, N, fs, fc, phi, code, coff, pos, npos, corr1, C1);
+    sdr_corr_std(buff, 8000, N, fs, fc, phi, code, coff, pos, npos, corr2, C2);
+    for (int i = 0; i < npos; i++) {
+        TEST_ASSERT_NEAR(corr1[i][0], corr2[i][0], 1e-3);
+        TEST_ASSERT_NEAR(corr1[i][1], corr2[i][1], 1e-3);
+    }
+    sdr_free(code);
     sdr_buff_free(buff);
 }
 
@@ -452,6 +537,7 @@ int main(void)
     TEST_RUN(test_sdr_tag_api);
     TEST_RUN(test_sdr_mix_carr_api);
     TEST_RUN(test_sdr_corr_api);
+    TEST_RUN(test_sdr_corr_std_equiv);
     TEST_RUN(test_sdr_search_helper_api);
     TEST_RUN(test_sdr_psd_api);
     TEST_RUN(test_sdr_stream_api);
