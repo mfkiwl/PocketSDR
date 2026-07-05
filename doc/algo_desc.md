@@ -1,7 +1,7 @@
 ﻿# Pocket SDR GNSS SDR Algorithm Description
 
 <div style="text-align: right;">
-<strong>ver.0.17  2026-06-17</strong>
+<strong>ver.0.18  2026-07-06</strong>
 </div>
 
 ---
@@ -228,7 +228,7 @@ sample values are compact signed integer I/Q pairs, not floating-point complex
 samples. Carrier wipeoff converts the compact buffer into `sdr_cpx16_t` working
 samples. In the standard correlator this conversion is fused with the
 correlation itself: each cache-sized chunk is carrier-wiped and immediately
-correlated, so no full-length baseband buffer is written. The FFT-based paths
+correlated, so no full-length baseband buffer is written. The L6 CSK path
 (`L6D`/`L6E`) and the complex-code path (`E5ABQ`) still convert a full code
 period into a `sdr_cpx16_t` working buffer. Correlator outputs are accumulated
 in `sdr_cpx_t`, which is the floating-point complex type used by the FFT and
@@ -615,9 +615,9 @@ Otherwise the channel returns to idle.
 can be found before secondary-code alignment is known. The full E5aQ/E5bQ
 pilot combination is used later in tracking after secondary-code sync.
 
-Long or CSK-like signals such as QZSS `L6D` and `L6E` use FFT correlation in
-the tracking path as well, because their code and CSK symbol structure make a
-full code-phase correlation useful after lock.
+QZSS `L6D` and `L6E` acquire like ordinary signals, but their CSK symbol
+structure also requires a code-shift search after lock; tracking runs a
+separate small chip-domain FFT correlation for that purpose (see 4.16).
 
 ### 3.5 Acquisition State Data
 
@@ -858,8 +858,10 @@ between three precomputed banks: E5aQ only before secondary-code sync, and two
 E5aQ/E5bQ pilot combinations after sync depending on the relative secondary
 code polarity.
 
-For `L6D` and `L6E`, tracking uses FFT correlation and then detects the CSK
-symbol from the peak displacement around the prompt region.
+For `L6D` and `L6E`, the CSK symbol is detected by a chip-domain FFT
+correlation over the candidate code shifts, and the correlator outputs are
+then produced by the standard correlator against the CSK-shifted code
+(see 4.16).
 
 <br>
 <div style="text-align: center;">
@@ -983,7 +985,8 @@ The tracking state is stored in `sdr_trk_t`. Important fields are:
 | `sumD` | Prompt `I^2-Q^2` sum for the carrier lock indicator (PLI) |
 | `sumC[]`, `sumI[]` | DLL accumulation buffers |
 | `code` | Resampled tracking code bank |
-| `code_fft` | FFT tracking code bank for L6 |
+| `code_fft` | Chip-domain extended-code FFT for L6 CSK detection |
+| `csk_ref` | L6 CSK code-shift reference after frame sync (-1: unset) |
 
 The channel object `sdr_ch_t` stores the loop state that must persist across
 epochs: Doppler, code offset, continuous carrier phase (`phi`), accumulated
@@ -1233,17 +1236,46 @@ the previous lock was long enough and recent enough.
 
 ### 4.16 L6 CSK Tracking
 
-QZSS L6 signals use code shift keying. In the tracking path, the receiver first
-carrier-wipes one code period and runs an FFT correlator with the selected L6
-code FFT. The CSK symbol is detected from the correlation peak location around
-the prompt region. The detected symbol is appended to the navigation symbol
-buffer.
+QZSS L6 signals use code shift keying: the 10230-chip code is cyclically
+shifted by the 8-bit symbol value each 4 ms symbol. On air, L6D and L6E are
+time-division multiplexed at twice the chip rate; each code chip consists of
+two sub-chip slots, with L6D occupying the even slot and L6E the odd slot.
 
-After CSK peak detection, the receiver interpolates correlator outputs at the
-prompt and loop-control positions so that FLL, PLL, DLL, and C/N0 update can
-reuse the same channel tracking structure. This keeps the external channel
-state similar to ordinary signals even though the symbol extraction is
-fundamentally different.
+Symbol detection and loop tracking are decoupled:
+
+1. One code period is carrier-wiped into the channel work buffer.
+2. `sdr_bin_csk()` accumulates the samples of the signal's TDM slot chip by
+   chip, applying the fractional code offset at the bin boundaries, producing
+   a 10230-chip complex sequence.
+3. The sequence is circularly correlated with the code by a fixed-size FFT
+   (`CSK_NFFT = 10800`) against a replica periodically extended by
+   `CSK_WIN = 280` chips on both sides, which yields the exact circular
+   correlation for every shift in the +/-280-chip window without wrap-around
+   aliasing. The peak over the candidate shifts gives the CSK shift, and the
+   symbol is appended to the navigation symbol buffer.
+4. The E/P/L/N correlator outputs are produced by the standard time-domain
+   correlator with the detected shift added to the code offset, so FLL, PLL,
+   DLL, and C/N0 operate on true (non-interpolated) correlations of the
+   CSK-shifted code. The standard correlator is called with fixed code
+   polarity (`pol = 1`): the L6 window is symbol-aligned and circular, so no
+   data-bit flip can occur at the code wrap-around, and the normal flip
+   detector would fire randomly whenever one partial correlation is
+   noise-dominated.
+
+Because the correlation FFT size is fixed, the symbol-detection cost is
+independent of the sampling rate; only carrier wipeoff, chip binning, and the
+standard correlator scale with `fs`.
+
+Before frame synchronization, the code-phase reference established at
+acquisition is offset by the unknown symbol transmitted during acquisition, so
+the peak search covers shifts in [-255, +255]. This window contains each
+symbol value twice: shifts `s` and `s - 256` decode to the same symbol, but
+only one of them places the loop correlators on the true peak. Once the L6
+navigation decoder achieves frame sync and recovers the constant symbol
+offset (stored in `nav->coff`), the channel anchors `trk->csk_ref` and
+narrows the search to the 256 shifts `[csk_ref - 255, csk_ref]`, eliminating
+the alias candidates. The anchor is cleared when frame sync is lost, so a
+wrong anchor self-heals within one frame.
 
 ### 4.17 E5 AltBOC Tracking
 
@@ -1495,10 +1527,11 @@ SF2, and SF3 data into the channel navigation buffer. `L1CP` is the matching
 pilot path and obtains ambiguous timing from secondary-code sync.
 
 QZSS L6 `L6D` and `L6E` are decoded from CSK symbols. The tracking path
-detects the CSK shift and appends symbols; the navigation decoder then handles
-L6 frame structure and LDPC/error checks. These signals are also treated
-specially in tracking because correlation over all code shifts is needed to
-recover the CSK symbol.
+detects the CSK shift and appends symbols; the navigation decoder then
+synchronizes the frame on preamble differences, recovers the constant symbol
+offset, and checks the Reed-Solomon code. After frame sync, the recovered
+symbol offset (`nav->coff`) is also fed back to tracking to narrow the CSK
+peak search (see 4.16).
 
 ### 5.6 GLONASS Paths
 
@@ -1912,8 +1945,10 @@ resampling the spreading code during tracking.
 
 Acquisition uses FFT correlation over all code phases for each Doppler bin.
 Tracking uses time-domain dot products for normal short-code tracking, which is
-cheaper than FFT when only a few correlator taps are needed. L6 uses FFT
-correlation in tracking because the CSK symbol is encoded as a code-phase shift.
+cheaper than FFT when only a few correlator taps are needed. L6 additionally
+runs a small fixed-size chip-domain FFT each symbol to search the CSK
+code-phase shift; its E/P/L correlations use the time-domain correlator like
+any other signal.
 
 The low-level carrier mixer and correlator include AVX2 and NEON paths where
 available. Complex samples and code replicas are stored in compact integer
@@ -1939,7 +1974,7 @@ The hot-path memory layout is chosen to reduce copies and cache pressure:
 - raw input is read into a temporary byte buffer for one 1 ms receiver cycle;
 - unpacked IF samples are written directly into RF-channel circular buffers;
 - carrier-wiped samples are consumed chunk by chunk inside the standard
-  correlator; only the FFT and complex-code paths produce them into a
+  correlator; only the L6 CSK and complex-code paths produce them into a
   channel-local work buffer;
 - code replicas are precomputed in channel-local contiguous banks;
 - correlator outputs are small fixed arrays in the tracking state;
@@ -1967,11 +2002,12 @@ sampling mode.
 
 ### 7.9 FFTW and FFT Abstraction
 
-The FFT helper `sdr_cpx_fft()` hides the FFT implementation. Acquisition and L6
-tracking use it through `sdr_corr_fft()`. The codebase also supports FFTW
-wisdom generation and loading in the wider Pocket SDR toolchain. In the
-receiver path, the main algorithmic point is that code FFTs are generated once,
-while data FFTs are generated for each Doppler bin or each L6 tracking epoch.
+The FFT helper `sdr_cpx_fft()` hides the FFT implementation. Acquisition uses
+it through `sdr_corr_fft()`, and L6 CSK tracking uses it directly for the
+fixed-size chip-domain correlation. The codebase also supports FFTW wisdom
+generation and loading in the wider Pocket SDR toolchain. In the receiver
+path, the main algorithmic point is that code FFTs are generated once, while
+data FFTs are generated for each Doppler bin or each L6 symbol.
 
 The PCPS acquisition complexity for one coherent integration is roughly:
 
@@ -2040,9 +2076,10 @@ over a few taps is cheaper than an FFT over all code phases for each tracking
 epoch. This is why normal tracking uses `sdr_corr_std()` instead of
 `sdr_corr_fft()`.
 
-L6 is the exception because CSK data is encoded as a code-phase shift. The
-receiver must inspect a wide correlation region to find the symbol shift, so
-the FFT correlator remains useful in tracking.
+L6 also needs a wide correlation region each symbol because CSK data is
+encoded as a code-phase shift, but that search runs on chip-binned data with
+a small fixed-size FFT; the loop correlators still come from the time-domain
+correlator.
 
 ### 7.13 Avoiding Work in Idle Channels
 
@@ -2258,7 +2295,9 @@ ch_thread()
         -> search_sig() if SRCH
         -> track_sig()  if LOCK
             -> sdr_corr_std() (carrier mixing fused), or
-            -> sdr_mix_carr() -> sdr_corr_fft() / sdr_corr_std_cpx_code()
+            -> sdr_mix_carr() -> sdr_corr_std_cpx_code() (E5ABQ), or
+            -> sdr_mix_carr() -> sdr_bin_csk() -> chip-domain FFT
+               -> sdr_corr_std() with CSK-shifted code (L6D/E)
             -> sync_sec_code()
             -> FLL() or PLL()
             -> DLL()
@@ -2309,7 +2348,7 @@ activate specialized behavior.
 | GLONASS FDMA legacy | PRN argument represents FCN; carrier frequency is shifted |
 | BOC-like signals | Optional bump-jump monitor taps |
 | Pilot signals | Timing may be secondary-code based and ambiguity-resolved |
-| `L6D`, `L6E` | FFT tracking and CSK symbol detection |
+| `L6D`, `L6E` | Chip-domain FFT CSK symbol detection, CSK-shifted E/P/L |
 | `E5ABQ` | E5aQ acquisition, AltBOC complex-code tracking banks |
 | GPS/QZSS CNAV-2 | LDPC decoding and known SF1 symbol-table sync |
 | Galileo I/NAV/F/NAV | Separate ephemeris ingestion paths |
@@ -2362,8 +2401,8 @@ may require one of these strategies:
 
 Special modulation may also require a complex local replica or a tracking
 correlator that searches more than prompt/early/late positions. `E5ABQ` and L6
-are examples of two different solutions: complex-code banks for AltBOC, and FFT
-tracking for CSK.
+are examples of two different solutions: complex-code banks for AltBOC, and a
+chip-domain FFT symbol search for CSK.
 
 ### E.3 Changing Loop Bandwidths
 
