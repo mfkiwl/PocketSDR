@@ -1,7 +1,7 @@
 # Pocket SDR C Library API Reference
 
 <div style="text-align: right;">
-<strong>ver.0.17  2026-06-17</strong>
+<strong>ver.0.18  2026-07-06</strong>
 </div>
 
 ---
@@ -187,7 +187,7 @@ This API reference describes the **Pocket SDR** C library (`libsdr`). The librar
 <br><br>
 
 - `sdr_trk_t`
-  - Tracking state: correlator positions and complex outputs; P history (`SDR_N_HIST`); secondary code sync/polarity; phase / code error; accumulators for DLL/PLL; resampled real code bank (`int8_t`), complex code bank (E5ABQ) and code FFT.
+  - Tracking state: correlator positions and complex outputs; P history (`SDR_N_HIST`); secondary code sync/polarity; L6 CSK code-shift reference (`csk_ref`); phase / code error; accumulators for DLL/PLL; resampled real code bank (`int8_t`), complex code bank (E5ABQ) and the chip-domain extended-code FFT for L6 CSK detection.
 <br><br>
 
 - `sdr_nav_t`
@@ -681,9 +681,9 @@ General DSP and bookkeeping helpers: complex/FFT primitives, IF buffer / file I/
 - **Return**: heap-allocated float array (free with `sdr_free()`)
 <br><br>
 
-**`void sdr_corr_std(const sdr_buff_t *buff, int ix, int N, double fs, double fc, double phi, const int8_t *code, double coff, const double *pos, int n, sdr_cpx_t *corr, sdr_cpx_t *C)`**
+**`void sdr_corr_std(const sdr_buff_t *buff, int ix, int N, double fs, double fc, double phi, const int8_t *code, double coff, const double *pos, int n, int pol, sdr_cpx_t *corr, sdr_cpx_t *C)`**
 <br>
-- **Description**: Standard time-domain correlator with fused carrier wipeoff. Mixes the carrier (`fc`, `phi`) and correlates against the real-code replicas in a single chunked pass over `buff[ix..ix+N)`, without an intermediate baseband buffer. `code` is the resampled code bank (`N x SDR_N_CODES`, `int8_t` values -1/0/1, I=Q implied). Writes `n` correlations to `corr` and the pre/post code-wrap prompt correlations to `C[0..1]` (bit-transition handling).
+- **Description**: Standard time-domain correlator with fused carrier wipeoff. Mixes the carrier (`fc`, `phi`) and correlates against the real-code replicas in a single chunked pass over `buff[ix..ix+N)`, without an intermediate baseband buffer. `code` is the resampled code bank (`N x SDR_N_CODES`, `int8_t` values -1/0/1, I=Q implied). Writes `n` correlations to `corr` and the pre/post code-wrap prompt correlations to `C[0..1]` (bit-transition handling). `pol` selects the code polarity handling over the wrap-around: 0 detects a data-bit flip (normal tracking), 1 assumes fixed polarity (symbol-aligned circular window, e.g. L6 CSK).
 <br><br>
 
 **`void sdr_corr_std_cpx_code(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code, int N, double coff, const double *pos, int n, sdr_cpx_t *corr, sdr_cpx_t *C)`**
@@ -696,9 +696,9 @@ General DSP and bookkeeping helpers: complex/FFT primitives, IF buffer / file I/
 - **Description**: Time-domain correlator that mixes carrier (`fc`, `phi`) on the fly while accumulating into `corr`.
 <br><br>
 
-**`void sdr_corr_fft(const sdr_cpx16_t *IQ, const sdr_cpx_t *code_fft, int N, sdr_cpx_t *corr)`**
+**`void sdr_corr_fft(const sdr_buff_t *buff, int ix, int N, double fs, double fc, double phi, const sdr_cpx_t *code_fft, sdr_cpx_t *corr)`**
 <br>
-- **Description**: Frequency-domain correlation: forward FFT of IQ, multiply by `code_fft`, inverse FFT into `corr`.
+- **Description**: Frequency-domain correlation with fused carrier wipeoff. Mixes the carrier (`fc`, `phi`) on `buff[ix..ix+N)` directly into the FFT input, then forward FFT, multiply by `code_fft`, inverse FFT into `corr`. Uses a per-thread persistent scratch buffer (no per-call allocation).
 <br><br>
 
 **`void sdr_corr_fft_cpx(const sdr_cpx_t *buff, int len_buff, int ix, int N, double fs, double fc, double phi, const sdr_cpx_t *code_fft, sdr_cpx_t *corr)`**
@@ -709,6 +709,11 @@ General DSP and bookkeeping helpers: complex/FFT primitives, IF buffer / file I/
 **`void sdr_mix_carr(const sdr_buff_t *buff, int ix, int N, double fs, double fc, double phi, sdr_cpx16_t *IQ)`**
 <br>
 - **Description**: Wipe-off carrier from `buff[ix..ix+N)` using `cos/sin(2π·fc·t + phi)` and write 8-bit complex baseband to `IQ`.
+<br><br>
+
+**`void sdr_bin_csk(const sdr_cpx16_t *IQ, int N, int len_code, int slot, double coff, sdr_cpx_t *bins)`**
+<br>
+- **Description**: Bin carrier-mixed IF data to code chips for L6 CSK decoding. Accumulates samples of one of the two TDM sub-chip slots per code chip (L6D: `slot=0`, L6E: `slot=1`) into `bins` (`len_code/2` chips). `coff` is the fractional code offset in samples.
 <br><br>
 
 **`void sdr_psd_cpx(const sdr_cpx_t *buff, int len_buff, int N, double fs, int IQ, float *psd)`**
