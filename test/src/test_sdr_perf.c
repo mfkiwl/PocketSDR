@@ -41,8 +41,10 @@ typedef struct {
 } mix_ctx_t;
 
 typedef struct {
+    sdr_buff_t buff;
     sdr_cpx16_t *IQ;
-    sdr_cpx16_t *code;
+    int8_t *code;
+    sdr_cpx16_t *code_cpx;
     sdr_cpx_t corr[SDR_MAX_CORR], C[2];
     double pos[4];
     int N;
@@ -119,15 +121,23 @@ static void fill_cpx16(sdr_cpx16_t *data, int N)
     }
 }
 
-// fill resampled code bank ----------------------------------------------------
-static void fill_code_bank(sdr_cpx16_t *code, int N, int cpx)
+// fill resampled real code bank -----------------------------------------------
+static void fill_code_bank(int8_t *code, int N)
 {
     for (int k = 0; k < SDR_N_CODES; k++) {
         for (int i = 0; i < N; i++) {
-            int8_t I = (int8_t)(((i + k) & 1) ? -1 : 1);
-            int8_t Q = cpx ? (int8_t)(((i + 2 * k) & 1) ? -1 : 1) : I;
-            code[k * N + i].I = I;
-            code[k * N + i].Q = Q;
+            code[k * N + i] = (int8_t)((((i + k) & 1)) ? -1 : 1);
+        }
+    }
+}
+
+// fill resampled complex code bank ----------------------------------------------
+static void fill_code_bank_cpx(sdr_cpx16_t *code, int N)
+{
+    for (int k = 0; k < SDR_N_CODES; k++) {
+        for (int i = 0; i < N; i++) {
+            code[k * N + i].I = (int8_t)(((i + k) & 1) ? -1 : 1);
+            code[k * N + i].Q = (int8_t)(((i + 2 * k) & 1) ? -1 : 1);
         }
     }
 }
@@ -209,20 +219,21 @@ static void bench_mix_carr(void *ctx)
     perf_sink += p->IQ[0].I;
 }
 
-// benchmark sdr_corr_std() ----------------------------------------------------
-static void bench_corr_std(void *ctx)
-{
-    corr_std_ctx_t *p = (corr_std_ctx_t *)ctx;
-    sdr_corr_std(p->IQ, p->code, p->N, 0.35, p->pos, 4, p->corr, p->C);
-    perf_sink += p->corr[0][0];
-}
-
 // benchmark sdr_corr_std_cpx_code() -------------------------------------------
 static void bench_corr_std_cpx_code(void *ctx)
 {
     corr_std_ctx_t *p = (corr_std_ctx_t *)ctx;
-    sdr_corr_std_cpx_code(p->IQ, p->code, p->N, 0.35, p->pos, 4, p->corr,
+    sdr_corr_std_cpx_code(p->IQ, p->code_cpx, p->N, 0.35, p->pos, 4, p->corr,
         p->C);
+    perf_sink += p->corr[0][0];
+}
+
+// benchmark sdr_corr_std() ----------------------------------------------------
+static void bench_corr_std(void *ctx)
+{
+    corr_std_ctx_t *p = (corr_std_ctx_t *)ctx;
+    sdr_corr_std(&p->buff, 17, p->N, 24e6, -4200.0, 0.125, p->code, 0.35,
+        p->pos, 4, p->corr, p->C);
     perf_sink += p->corr[0][0];
 }
 
@@ -352,24 +363,40 @@ static void run_main_size_case(const char *api, int N, int8_t *code_I,
         sdr_free(ctx.IQ);
         sdr_free(ctx.buff.data);
     }
-    else if (!strcmp(api, "sdr_corr_std") ||
-        !strcmp(api, "sdr_corr_std_cpx_code")) {
+    else if (!strcmp(api, "sdr_corr_std")) {
         corr_std_ctx_t ctx;
-        int cpx = !strcmp(api, "sdr_corr_std_cpx_code");
         
         ctx.N = N;
-        ctx.IQ = (sdr_cpx16_t *)sdr_malloc(sizeof(sdr_cpx16_t) * N);
-        ctx.code = (sdr_cpx16_t *)sdr_malloc(sizeof(sdr_cpx16_t) * N *
-            SDR_N_CODES);
-        fill_cpx16(ctx.IQ, N);
-        fill_code_bank(ctx.code, N, cpx);
+        ctx.buff.data = (sdr_cpx8_t *)sdr_malloc(sizeof(sdr_cpx8_t) *
+            (N + 32));
+        ctx.buff.IQ = 2;
+        ctx.buff.N = N + 32;
+        fill_cpx8(ctx.buff.data, ctx.buff.N);
+        ctx.code = (int8_t *)sdr_malloc(sizeof(int8_t) * N * SDR_N_CODES);
+        fill_code_bank(ctx.code, N);
         ctx.pos[0] = -0.5;
         ctx.pos[1] = 0.0;
         ctx.pos[2] = 0.5;
         ctx.pos[3] = 1.0;
-        run_bench(api, N, N, cpx ? bench_corr_std_cpx_code : bench_corr_std,
-            &ctx);
+        run_bench(api, N, N, bench_corr_std, &ctx);
         sdr_free(ctx.code);
+        sdr_free(ctx.buff.data);
+    }
+    else if (!strcmp(api, "sdr_corr_std_cpx_code")) {
+        corr_std_ctx_t ctx;
+        
+        ctx.N = N;
+        ctx.IQ = (sdr_cpx16_t *)sdr_malloc(sizeof(sdr_cpx16_t) * N);
+        ctx.code_cpx = (sdr_cpx16_t *)sdr_malloc(sizeof(sdr_cpx16_t) * N *
+            SDR_N_CODES);
+        fill_cpx16(ctx.IQ, N);
+        fill_code_bank_cpx(ctx.code_cpx, N);
+        ctx.pos[0] = -0.5;
+        ctx.pos[1] = 0.0;
+        ctx.pos[2] = 0.5;
+        ctx.pos[3] = 1.0;
+        run_bench(api, N, N, bench_corr_std_cpx_code, &ctx);
+        sdr_free(ctx.code_cpx);
         sdr_free(ctx.IQ);
     }
     else if (!strcmp(api, "sdr_corr_fft")) {
