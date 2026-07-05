@@ -57,7 +57,7 @@ else
     INSTALL = ../linux
     INCLUDE +=
     ifeq ($(shell uname -m),aarch64)
-        OPTIONS += -DNEON
+        OPTIONS += -DNEON -mcpu=native
     else ifeq ($(USE_AVX2),1)
         OPTIONS += -DAVX2 -mavx2 -mfma
     endif
