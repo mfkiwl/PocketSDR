@@ -51,7 +51,7 @@ typedef struct {
 } corr_std_ctx_t;
 
 typedef struct {
-    sdr_cpx16_t *IQ;
+    sdr_buff_t buff;
     sdr_cpx_t *code_fft, *corr;
     int N;
 } corr_fft_ctx_t;
@@ -79,6 +79,12 @@ typedef struct {
     sdr_rcv_t rcv;
     int N;
 } arch_ctx_t;
+
+typedef struct {
+    sdr_ch_t *ch;
+    sdr_buff_t *buff;
+    double time;
+} ch_l6_ctx_t;
 
 // get high-resolution time ----------------------------------------------------
 static double now_sec(void)
@@ -233,7 +239,7 @@ static void bench_corr_std(void *ctx)
 {
     corr_std_ctx_t *p = (corr_std_ctx_t *)ctx;
     sdr_corr_std(&p->buff, 17, p->N, 24e6, -4200.0, 0.125, p->code, 0.35,
-        p->pos, 4, p->corr, p->C);
+        p->pos, 4, 0, p->corr, p->C);
     perf_sink += p->corr[0][0];
 }
 
@@ -241,7 +247,8 @@ static void bench_corr_std(void *ctx)
 static void bench_corr_fft(void *ctx)
 {
     corr_fft_ctx_t *p = (corr_fft_ctx_t *)ctx;
-    sdr_corr_fft(p->IQ, p->code_fft, p->N, p->corr);
+    sdr_corr_fft(&p->buff, 17, p->N, 24e6, -4200.0, 0.125, p->code_fft,
+        p->corr);
     perf_sink += p->corr[0][0];
 }
 
@@ -307,6 +314,35 @@ static void free_arch_ctx(arch_ctx_t *ctx)
         test_buff_free(ctx->rcv.buff[i]);
     }
     sdr_array_free(ctx->array);
+}
+
+// benchmark sdr_ch_update() with L6D CSK tracking ------------------------------
+static void bench_ch_update_l6(void *ctx)
+{
+    ch_l6_ctx_t *p = (ch_l6_ctx_t *)ctx;
+    p->ch->state = SDR_STATE_LOCK;
+    p->time += p->ch->T;
+    sdr_ch_update(p->ch, p->time, p->buff, 0);
+    perf_sink += p->ch->trk->C[0][0];
+}
+
+// run L6D CSK tracking benchmark cases ------------------------------------------
+static void run_ch_update_l6_cases(void)
+{
+    static const int CH_N[] = {48000, 64000, 96000}; // fs = 12, 16, 24 MHz
+    
+    for (int i = 0; i < 3; i++) {
+        int N = CH_N[i];
+        ch_l6_ctx_t ctx;
+        
+        ctx.ch = sdr_ch_new("L6D", 194, N / 4e-3, 0.0);
+        TEST_ASSERT_TRUE(ctx.ch != NULL);
+        ctx.buff = test_buff_new(N * 2);
+        ctx.time = 0.0;
+        run_bench("sdr_ch_update(L6D)", N, N, bench_ch_update_l6, &ctx);
+        test_buff_free(ctx.buff);
+        sdr_ch_free(ctx.ch);
+    }
 }
 
 // run one main benchmark case -------------------------------------------------
@@ -403,16 +439,19 @@ static void run_main_size_case(const char *api, int N, int8_t *code_I,
         corr_fft_ctx_t ctx;
         
         ctx.N = N;
-        ctx.IQ = (sdr_cpx16_t *)sdr_malloc(sizeof(sdr_cpx16_t) * N);
+        ctx.buff.data = (sdr_cpx8_t *)sdr_malloc(sizeof(sdr_cpx8_t) *
+            (N + 32));
+        ctx.buff.IQ = 2;
+        ctx.buff.N = N + 32;
+        fill_cpx8(ctx.buff.data, ctx.buff.N);
         ctx.code_fft = sdr_cpx_malloc(N);
         ctx.corr = sdr_cpx_malloc(N);
-        fill_cpx16(ctx.IQ, N);
         sdr_gen_code_fft(code_I, NULL, len_code, 1e-3, 0.0,
             (double)N / 1e-3, N, 0, ctx.code_fft);
         run_bench(api, N, N, bench_corr_fft, &ctx);
         sdr_cpx_free(ctx.corr);
         sdr_cpx_free(ctx.code_fft);
-        sdr_free(ctx.IQ);
+        sdr_free(ctx.buff.data);
     }
     else if (!strcmp(api, "sdr_res_code")) {
         res_code_ctx_t ctx;
@@ -502,6 +541,7 @@ int main(int argc, char **argv)
     run_main_api_cases("sdr_corr_std", code_I, len_code);
     run_main_api_cases("sdr_corr_std_cpx_code", code_I, len_code);
     run_main_api_cases("sdr_corr_fft", code_I, len_code);
+    run_ch_update_l6_cases();
     run_psd_cases();
     run_main_api_cases("sdr_res_code", code_I, len_code);
     run_main_api_cases("sdr_gen_code_fft", code_I, len_code);
