@@ -226,9 +226,13 @@ and code states by the elapsed time from the previous channel update.
 After input conversion, the receiver stores IF samples as `sdr_cpx8_t`. The
 sample values are compact signed integer I/Q pairs, not floating-point complex
 samples. Carrier wipeoff converts the compact buffer into `sdr_cpx16_t` working
-samples for correlation. Correlator outputs are accumulated in `sdr_cpx_t`,
-which is the floating-point complex type used by the FFT and loop
-discriminators.
+samples. In the standard correlator this conversion is fused with the
+correlation itself: each cache-sized chunk is carrier-wiped and immediately
+correlated, so no full-length baseband buffer is written. The FFT-based paths
+(`L6D`/`L6E`) and the complex-code path (`E5ABQ`) still convert a full code
+period into a `sdr_cpx16_t` working buffer. Correlator outputs are accumulated
+in `sdr_cpx_t`, which is the floating-point complex type used by the FFT and
+loop discriminators.
 
 This representation is central to the implementation. It reduces memory
 bandwidth in the circular buffers, keeps lookup-table unpacking cheap, and
@@ -826,8 +830,10 @@ Data Flow of Signal Tracking
 
 At channel creation, the receiver builds a tracking replica bank. For ordinary
 real spreading codes, the code is resampled at `fs` for `SDR_N_CODES = 10`
-fractional code phases. Each tracking epoch selects the bank corresponding to
-the current fractional code offset.
+fractional code phases and stored as 1-byte `int8_t` samples (values -1/0/1),
+which halves the bank footprint compared to a complex representation. Each
+tracking epoch selects the bank corresponding to the current fractional code
+offset.
 
 The default correlator positions are:
 
@@ -836,10 +842,13 @@ The default correlator positions are:
 - noise correlator `N`, located far away at a fixed sample offset;
 - optional very-early and very-late correlators for BOC false-lock detection.
 
-For most signals, tracking uses the time-domain standard correlator. The IF
-samples are carrier-wiped, then correlated with prompt, early, late, noise, and
-optional BOC monitor replicas. The correlator splits the code period at the code
-wrap point and detects a polarity flip between the two halves, which reduces
+For most signals, tracking uses the time-domain standard correlator with fused
+carrier wipeoff: the IF samples are carrier-wiped and correlated with prompt,
+early, late, noise, and optional BOC monitor replicas chunk by chunk in a
+single pass, which keeps the working samples in cache and avoids re-reading a
+full-length baseband buffer for each correlator. The correlator splits the
+code period at the code wrap point and detects a polarity flip between the two
+halves, which reduces
 the impact of data-bit transitions inside the integration interval. The
 correlator logic, including the cross-epoch combination of the two halves, is
 shown in the figure below (detailed in §4.10–§4.11).
@@ -989,9 +998,12 @@ without rebuilding signal-specific resources.
 
 ### 4.8 Carrier Wipeoff Implementation
 
-Carrier wipeoff is performed by `sdr_mix_carr()`. The function accepts compact
-IF samples from an `sdr_buff_t`, a start index, a sample count, a sample rate,
-and a carrier frequency. It produces `sdr_cpx16_t` samples for the correlator.
+Carrier wipeoff is performed by `sdr_mix_carr()` or fused inside
+`sdr_corr_std()`. Both accept compact IF samples from an `sdr_buff_t`, a start
+index, a sample count, a sample rate, and a carrier frequency, and produce
+`sdr_cpx16_t` samples. `sdr_mix_carr()` writes them to a work buffer for the
+FFT correlator and the complex-code correlator; `sdr_corr_std()` consumes them
+chunk by chunk without materializing the full buffer.
 
 The phase passed into `sdr_mix_carr()` is expressed in cycles. The low-level
 implementation converts phase and frequency step to a fixed-point index into a
@@ -1049,7 +1061,9 @@ navigation-symbol timing remain aligned.
 
 ### 4.10 Standard Correlator Details
 
-For ordinary signals, `sdr_corr_std()` forms correlations at the requested
+For ordinary signals, `sdr_corr_std()` wipes off the carrier and forms
+correlations at the requested positions in one fused pass: each cache-sized
+chunk of IF samples is mixed and immediately accumulated into all correlator
 positions. For each position, it splits the local code into two contiguous
 segments around the code wrap point:
 
@@ -1924,7 +1938,9 @@ The hot-path memory layout is chosen to reduce copies and cache pressure:
 
 - raw input is read into a temporary byte buffer for one 1 ms receiver cycle;
 - unpacked IF samples are written directly into RF-channel circular buffers;
-- carrier-wiped samples are produced into a channel-local work buffer;
+- carrier-wiped samples are consumed chunk by chunk inside the standard
+  correlator; only the FFT and complex-code paths produce them into a
+  channel-local work buffer;
 - code replicas are precomputed in channel-local contiguous banks;
 - correlator outputs are small fixed arrays in the tracking state;
 - prompt history is a fixed rolling array rather than a dynamically growing
@@ -2241,8 +2257,8 @@ ch_thread()
     -> sdr_ch_update()
         -> search_sig() if SRCH
         -> track_sig()  if LOCK
-            -> sdr_mix_carr()
-            -> sdr_corr_std() / sdr_corr_fft()
+            -> sdr_corr_std() (carrier mixing fused), or
+            -> sdr_mix_carr() -> sdr_corr_fft() / sdr_corr_std_cpx_code()
             -> sync_sec_code()
             -> FLL() or PLL()
             -> DLL()
