@@ -20,6 +20,8 @@
 //  2024-08-26  1.12 update types and APIs
 //  2026-05-10  1.13 ver.0.15
 //  2026-06-01  1.14 ver.0.16
+//  2026-06-17  1.15 ver.0.17
+//  2026-07-05  1.16 ver.0.18
 //
 #ifndef POCKET_SDR_H
 #define POCKET_SDR_H
@@ -43,7 +45,7 @@ extern "C" {
 
 // constants and macros ------------------------------------------------------
 #define SDR_LIB_NAME   "Pocket SDR" // library name
-#define SDR_LIB_VER    "0.17"   // library version
+#define SDR_LIB_VER    "0.18"   // library version
 #define SDR_MAX_RFCH   8        // max number of RF channels
 #define SDR_MAX_ARCH   8        // max number of array channels
 #define SDR_MAX_BUFF   (SDR_MAX_RFCH+SDR_MAX_ARCH) // max number of IF buffer
@@ -183,7 +185,8 @@ typedef struct {                // signal tracking type
     double sumI[SDR_MAX_CORR];  // sum of I*sign(IP) DLL (data-wipe-off)
     double aveP[SDR_MAX_CORR];  // average of correlation powers
     double aveI[SDR_MAX_CORR];  // average of I*sign(IP) DLL
-    sdr_cpx16_t *code;          // resampled code 
+    int8_t *code;               // resampled code (real, -1/0/1)
+    sdr_cpx16_t *code_cpx;      // resampled code (complex, E5ABQ)
     sdr_cpx_t *code_fft;        // code FFT
 } sdr_trk_t;
 
@@ -412,8 +415,9 @@ double sdr_fine_dop(const float *P, int N, const float *fds, int len_fds,
     const int *ix);
 double sdr_shift_freq(const char *sig, int fcn, double fi);
 float *sdr_dop_bins(double T, float dop, float max_dop, int *len_fds);
-void sdr_corr_std(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code, int N,
-    double coff, const double *pos, int n, sdr_cpx_t *corr, sdr_cpx_t *C);
+void sdr_corr_std(const sdr_buff_t *buff, int ix, int N, double fs,
+    double fc, double phi, const int8_t *code, double coff,
+    const double *pos, int n, sdr_cpx_t *corr, sdr_cpx_t *C);
 void sdr_corr_std_cpx_code(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code,
     int N, double coff, const double *pos, int n, sdr_cpx_t *corr,
     sdr_cpx_t *C);
