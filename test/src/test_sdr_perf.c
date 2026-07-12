@@ -44,6 +44,7 @@ typedef struct {
     sdr_buff_t buff;
     sdr_cpx16_t *IQ;
     int8_t *code;
+    int32_t *code_sum;
     sdr_cpx16_t *code_cpx;
     sdr_cpx_t corr[SDR_MAX_CORR], C[2];
     double pos[4];
@@ -135,6 +136,20 @@ static void fill_code_bank(int8_t *code, int N)
             code[k * N + i] = (int8_t)((((i + k) & 1)) ? -1 : 1);
         }
     }
+}
+
+// generate prefix sums of code bank ---------------------------------------------
+static int32_t *gen_code_sum(const int8_t *code, int N)
+{
+    int32_t *code_sum = (int32_t *)sdr_malloc(sizeof(int32_t) * (N + 1) *
+        SDR_N_CODES);
+    for (int k = 0; k < SDR_N_CODES; k++) {
+        int32_t *cs = code_sum + k * (N + 1);
+        for (int i = 0; i < N; i++) {
+            cs[i+1] = cs[i] + code[k * N + i];
+        }
+    }
+    return code_sum;
 }
 
 // fill resampled complex code bank ----------------------------------------------
@@ -238,8 +253,8 @@ static void bench_corr_std_cpx_code(void *ctx)
 static void bench_corr_std(void *ctx)
 {
     corr_std_ctx_t *p = (corr_std_ctx_t *)ctx;
-    sdr_corr_std(&p->buff, 17, p->N, 24e6, -4200.0, 0.125, p->code, 0.35,
-        p->pos, 4, 0, p->corr, p->C);
+    sdr_corr_std(&p->buff, 17, p->N, 24e6, -4200.0, 0.125, p->code,
+        p->code_sum, 1, 0.35, p->pos, 4, 0, p->corr, p->C);
     perf_sink += p->corr[0][0];
 }
 
@@ -410,11 +425,13 @@ static void run_main_size_case(const char *api, int N, int8_t *code_I,
         fill_cpx8(ctx.buff.data, ctx.buff.N);
         ctx.code = (int8_t *)sdr_malloc(sizeof(int8_t) * N * SDR_N_CODES);
         fill_code_bank(ctx.code, N);
+        ctx.code_sum = gen_code_sum(ctx.code, N);
         ctx.pos[0] = -0.5;
         ctx.pos[1] = 0.0;
         ctx.pos[2] = 0.5;
         ctx.pos[3] = 1.0;
         run_bench(api, N, N, bench_corr_std, &ctx);
+        sdr_free(ctx.code_sum);
         sdr_free(ctx.code);
         sdr_free(ctx.buff.data);
     }

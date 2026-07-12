@@ -214,15 +214,18 @@ static void test_sdr_corr_api(void)
         buff->data[i] = pack_cpx8(i + 1, -i);
         code_fft[i][0] = code_fft[i][1] = 0.0f;
     }
+    int32_t code_sum[4 * SDR_N_CODES + SDR_N_CODES] = {0};
     for (int k = 0; k < SDR_N_CODES; k++) {
         for (int i = 0; i < N; i++) {
             code[k*N+i] = 1;
             code_cpx[k*N+i].I = 1;
             code_cpx[k*N+i].Q = 1;
+            code_sum[k*(N+1)+i+1] = code_sum[k*(N+1)+i] + 1;
         }
     }
-    
-    sdr_corr_std(buff, 0, N, 4.0, 0.0, 0.0, code, 0.0, pos, npos, 0, corr, C);
+
+    sdr_corr_std(buff, 0, N, 4.0, 0.0, 0.0, code, code_sum, 1, 0.0, pos, npos,
+        0, corr, C);
     TEST_ASSERT_TRUE(isfinite(corr[0][0]));
     TEST_ASSERT_TRUE(isfinite(corr[0][1]));
 
@@ -251,15 +254,29 @@ static void test_sdr_corr_api(void)
     sdr_buff_free(buff);
 }
 
+// generate prefix sums of code bank ---------------------------------------------
+static int32_t *gen_code_sum(const int8_t *code, int N)
+{
+    int32_t *code_sum = (int32_t *)sdr_malloc(sizeof(int32_t) * (N + 1) *
+        SDR_N_CODES);
+    for (int k = 0; k < SDR_N_CODES; k++) {
+        int32_t *cs = code_sum + k * (N + 1);
+        for (int i = 0; i < N; i++) {
+            cs[i+1] = cs[i] + code[k * N + i];
+        }
+    }
+    return code_sum;
+}
+
 // reference standard correlator (mix carrier + scalar correlations) -----------
 static void ref_corr_std(const sdr_buff_t *buff, int ix, int N, double fs,
-    double fc, double phi, const int8_t *code, double coff, const double *pos,
-    int n, sdr_cpx_t *corr, sdr_cpx_t *C)
+    double fc, double phi, const int8_t *code, int scale, double coff,
+    const double *pos, int n, sdr_cpx_t *corr, sdr_cpx_t *C)
 {
     sdr_cpx16_t *IQ = (sdr_cpx16_t *)sdr_malloc(sizeof(sdr_cpx16_t) * N);
     sdr_cpx_t corr1[SDR_MAX_CORR], corr2[SDR_MAX_CORR];
-    float dot_EPL = 0.0, sign;
-    
+    float dot_EPL = 0.0, sign, cscale = SDR_CSCALE / scale;
+
     sdr_mix_carr(buff, ix, N, fs, fc, phi, IQ);
     for (int i = 0; i < n; i++) {
         double p = coff + pos[i];
@@ -275,10 +292,10 @@ static void ref_corr_std(const sdr_buff_t *buff, int ix, int N, double fs,
             s2I += IQ[s].I * c[s-j];
             s2Q += IQ[s].Q * c[s-j];
         }
-        corr1[i][0] = s1I * SDR_CSCALE;
-        corr1[i][1] = s1Q * SDR_CSCALE;
-        corr2[i][0] = s2I * SDR_CSCALE;
-        corr2[i][1] = s2Q * SDR_CSCALE;
+        corr1[i][0] = s1I * cscale;
+        corr1[i][1] = s1Q * cscale;
+        corr2[i][0] = s2I * cscale;
+        corr2[i][1] = s2Q * cscale;
     }
     for (int i = 0; i < 3; i++) {
         dot_EPL += corr1[i][0] * corr2[i][0] + corr1[i][1] * corr2[i][1];
@@ -312,10 +329,13 @@ static void test_sdr_corr_std_equiv(void)
     for (int i = 0; i < N * SDR_N_CODES; i++) {
         code[i] = (int8_t)(i % 5 == 0 ? 0 : (i % 2 ? -1 : 1));
     }
+    int32_t *code_sum = gen_code_sum(code, N);
+
     // without IF buffer wrap-around
-    ref_corr_std(buff, 100, N, fs, fc, phi, code, coff, pos, npos, corr1, C1);
-    sdr_corr_std(buff, 100, N, fs, fc, phi, code, coff, pos, npos, 0, corr2,
-        C2);
+    ref_corr_std(buff, 100, N, fs, fc, phi, code, 1, coff, pos, npos, corr1,
+        C1);
+    sdr_corr_std(buff, 100, N, fs, fc, phi, code, code_sum, 1, coff, pos,
+        npos, 0, corr2, C2);
     for (int i = 0; i < npos; i++) {
         TEST_ASSERT_NEAR(corr1[i][0], corr2[i][0], 1e-9);
         TEST_ASSERT_NEAR(corr1[i][1], corr2[i][1], 1e-9);
@@ -325,13 +345,35 @@ static void test_sdr_corr_std_equiv(void)
         TEST_ASSERT_NEAR(C1[1][i], C2[1][i], 1e-9);
     }
     // across IF buffer wrap-around (phase re-quantized at the boundary)
-    ref_corr_std(buff, 8000, N, fs, fc, phi, code, coff, pos, npos, corr1, C1);
-    sdr_corr_std(buff, 8000, N, fs, fc, phi, code, coff, pos, npos, 0, corr2,
-        C2);
+    ref_corr_std(buff, 8000, N, fs, fc, phi, code, 1, coff, pos, npos, corr1,
+        C1);
+    sdr_corr_std(buff, 8000, N, fs, fc, phi, code, code_sum, 1, coff, pos,
+        npos, 0, corr2, C2);
     for (int i = 0; i < npos; i++) {
         TEST_ASSERT_NEAR(corr1[i][0], corr2[i][0], 1e-3);
         TEST_ASSERT_NEAR(corr1[i][1], corr2[i][1], 1e-3);
     }
+    sdr_free(code_sum);
+
+    // int8 multi-level code values (CBOC levels scaled by SDR_CBOC_SCALE)
+    for (int i = 0; i < N * SDR_N_CODES; i++) {
+        int8_t level = (int8_t)(i % 3 == 0 ? 40 : 21);
+        code[i] = (int8_t)(i % 2 ? -level : level);
+    }
+    code_sum = gen_code_sum(code, N);
+    ref_corr_std(buff, 100, N, fs, fc, phi, code, SDR_CBOC_SCALE, coff, pos,
+        npos, corr1, C1);
+    sdr_corr_std(buff, 100, N, fs, fc, phi, code, code_sum, SDR_CBOC_SCALE,
+        coff, pos, npos, 0, corr2, C2);
+    for (int i = 0; i < npos; i++) {
+        TEST_ASSERT_NEAR(corr1[i][0], corr2[i][0], 1e-9);
+        TEST_ASSERT_NEAR(corr1[i][1], corr2[i][1], 1e-9);
+    }
+    for (int i = 0; i < 2; i++) {
+        TEST_ASSERT_NEAR(C1[0][i], C2[0][i], 1e-9);
+        TEST_ASSERT_NEAR(C1[1][i], C2[1][i], 1e-9);
+    }
+    sdr_free(code_sum);
     sdr_free(code);
     sdr_buff_free(buff);
 }

@@ -1512,7 +1512,7 @@ def update_corr_plot1(p, coff, fs, npos, pos, w, C, aveC, aveI, type, rng):
     plt.plot_axis(p, gcolor=None)
     plt.plot_text(p, p.xl[1] - 18 / xs, p.yl[0] + 10 / ys, 'COFF (ms)',
         anchor=SE)
-    plot_scale(p, x[0] + w * 4.5e2 - 20 / xs, yl[1] - 20 / ys, w * 1e2, '%.2f ns' % (w * 1e5))
+    plot_scale(p, x[0] + w * 4.5e2 - 20 / xs, yl[1] - 20 / ys, w * 1e2, '%.2f us' % (w * 1e5))
     if type == 'AveIQ' or type == 'AveI':
         plt.plot_text(p, p.xl[1] - 18 / xs, p.yl[1] - 32 / ys,
             'Integ = %s s' % (sys_opt.t_dll.get()), anchor=NE)

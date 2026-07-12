@@ -27,6 +27,7 @@
 //  2026-07-05  1.18 decode L6 CSK by chip-domain FFT correlation
 //  2026-07-05  1.19 fix polarity of L6D/E EPL correlations
 //  2026-07-05  1.20 narrow CSK peak search range after L6 frame sync
+//  2026-07-08  1.21 support sdr_corr_std() API change for int8 code values
 //
 #include <ctype.h>
 #include <math.h>
@@ -302,7 +303,20 @@ static sdr_trk_t *trk_new(const char *sig, int prn, const int8_t *code,
             }
         }
         sdr_free(tmp);
+#if defined(AVX2)
+        // prefix sums of code bank (bias correction in sdr_corr_std())
+        trk->code_sum = (int32_t *)sdr_malloc(sizeof(int32_t) * (N + 1) *
+            SDR_N_CODES);
+        for (int i = 0; i < SDR_N_CODES; i++) {
+            const int8_t *p = trk->code + i * N;
+            int32_t *cs = trk->code_sum + i * (N + 1);
+            for (int s = 0; s < N; s++) {
+                cs[s+1] = cs[s] + p[s];
+            }
+        }
+#endif
     }
+    trk->code_scale = sdr_code_scale(sig);
     return trk;
 }
 
@@ -311,6 +325,7 @@ static void trk_free(sdr_trk_t *trk)
 {
     if (!trk) return;
     sdr_free(trk->code);
+    sdr_free(trk->code_sum);
     sdr_free(trk->code_cpx);
     sdr_cpx_free(trk->code_fft);
     sdr_free(trk);
@@ -757,8 +772,8 @@ static void track_sig(sdr_ch_t *ch, double time, const sdr_buff_t *buff, int ix)
         double R = (double)ch->N / (ch->len_code / 2); // samples / chip
         sdr_cpx_t C1[2];
         sdr_corr_std(buff, ix + i, ch->N, ch->fs, fc,
-            ch->phi + fc * i / ch->fs, ch->trk->code,
-            ch->coff * ch->fs - i + csk * R, ch->trk->pos,
+            ch->phi + fc * i / ch->fs, ch->trk->code, ch->trk->code_sum,
+            ch->trk->code_scale, ch->coff * ch->fs - i + csk * R, ch->trk->pos,
             ch->trk->npos + ch->trk->nposx, 1, ch->trk->C, C1);
         
         // add P correlator outputs to history 
@@ -775,8 +790,9 @@ static void track_sig(sdr_ch_t *ch, double time, const sdr_buff_t *buff, int ix)
         } else {
             // standard correlator (carrier mixing fused)
             sdr_corr_std(buff, ix, ch->N, ch->fs, fc, ch->phi, ch->trk->code,
-                ch->coff * ch->fs, ch->trk->pos,
-                ch->trk->npos + ch->trk->nposx, 0, ch->trk->C, C1);
+                ch->trk->code_sum, ch->trk->code_scale, ch->coff * ch->fs,
+                ch->trk->pos, ch->trk->npos + ch->trk->nposx, 0, ch->trk->C,
+                C1);
         }
         for (int i = 0; i < 2; i++) {
             C1[0][i] = (C1[0][i] + ch->trk->C1[i]) / ch->N;

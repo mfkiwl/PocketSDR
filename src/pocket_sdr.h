@@ -61,6 +61,7 @@ extern "C" {
 #define SDR_N_HIST     5000     // number of P correlator history
 #define SDR_N_CODES    10       // number of resampled code bank
 #define SDR_CSCALE    (1/11.2f) // carrier scale (max(IQ)*sqrt(2)/scale<=127)
+#define SDR_CBOC_SCALE 32       // code amplitude scale of CBOC codes
 #define SDR_CYC        1e-3     // IF data processing cycle (s)
 #define PI 3.1415926535897932   // pi
 
@@ -186,7 +187,9 @@ typedef struct {                // signal tracking type
     double sumI[SDR_MAX_CORR];  // sum of I*sign(IP) DLL (data-wipe-off)
     double aveP[SDR_MAX_CORR];  // average of correlation powers
     double aveI[SDR_MAX_CORR];  // average of I*sign(IP) DLL
-    int8_t *code;               // resampled code (real, -1/0/1)
+    int8_t *code;               // resampled code (real, int8)
+    int32_t *code_sum;          // prefix sums of code (AVX2 bias correction)
+    int code_scale;             // code amplitude scale
     sdr_cpx16_t *code_cpx;      // resampled code (complex, E5ABQ)
     sdr_cpx_t *code_fft;        // code FFT
 } sdr_trk_t;
@@ -417,8 +420,9 @@ double sdr_fine_dop(const float *P, int N, const float *fds, int len_fds,
 double sdr_shift_freq(const char *sig, int fcn, double fi);
 float *sdr_dop_bins(double T, float dop, float max_dop, int *len_fds);
 void sdr_corr_std(const sdr_buff_t *buff, int ix, int N, double fs,
-    double fc, double phi, const int8_t *code, double coff,
-    const double *pos, int n, int pol, sdr_cpx_t *corr, sdr_cpx_t *C);
+    double fc, double phi, const int8_t *code, const int32_t *code_sum,
+    int scale, double coff, const double *pos, int n, int pol,
+    sdr_cpx_t *corr, sdr_cpx_t *C);
 void sdr_corr_std_cpx_code(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code,
     int N, double coff, const double *pos, int n, sdr_cpx_t *corr,
     sdr_cpx_t *C);
@@ -465,6 +469,7 @@ int sdr_code_len(const char *sig);
 double sdr_sig_freq(const char *sig);
 void sdr_sat_id(const char *sig, int prn, char *sat);
 int sdr_sig_boc(const char *sig);
+int sdr_code_scale(const char *sig);
 // Pass code_Q = NULL for real (BPSK) codes; non-NULL for complex codes.
 void sdr_res_code(const int8_t *code_I, const int8_t *code_Q, int len_code,
     double T, double coff, double fs, int N, int Nz, sdr_cpx16_t *code_res);
