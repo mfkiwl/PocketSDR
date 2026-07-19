@@ -62,6 +62,7 @@ extern "C" {
 #define SDR_N_CODES    10       // number of resampled code bank
 #define SDR_CSCALE    (1/11.2f) // carrier scale (max(IQ)*sqrt(2)/scale<=127)
 #define SDR_CBOC_SCALE 32       // code amplitude scale of CBOC codes
+#define SDR_ALTBOC_SCALE 32     // code amplitude scale of AltBOC sub-carriers
 #define SDR_CYC        1e-3     // IF data processing cycle (s)
 #define PI 3.1415926535897932   // pi
 
@@ -187,10 +188,12 @@ typedef struct {                // signal tracking type
     double sumI[SDR_MAX_CORR];  // sum of I*sign(IP) DLL (data-wipe-off)
     double aveP[SDR_MAX_CORR];  // average of correlation powers
     double aveI[SDR_MAX_CORR];  // average of I*sign(IP) DLL
-    int8_t *code;               // resampled code (real, int8)
-    int32_t *code_sum;          // prefix sums of code (AVX2 bias correction)
+    int8_t *code;               // resampled code banks (int8, E5ABQ:aI,aQ,bI,bQ)
+    int32_t *code_sum;          // prefix sums of code (data bias correction)
     int code_scale;             // code amplitude scale
-    sdr_cpx16_t *code_cpx;      // resampled code (complex, E5ABQ)
+    int e5b_pol;                // E5b combination polarity (0:calibrating)
+    int e5b_cnt;                // E5b polarity calibration epochs
+    double e5b_score;           // E5b polarity calibration score
     sdr_cpx_t *code_fft;        // code FFT
 } sdr_trk_t;
 
@@ -423,9 +426,6 @@ void sdr_corr_std(const sdr_buff_t *buff, int ix, int N, double fs,
     double fc, double phi, const int8_t *code, const int32_t *code_sum,
     int scale, double coff, const double *pos, int n, int pol,
     sdr_cpx_t *corr, sdr_cpx_t *C);
-void sdr_corr_std_cpx_code(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code,
-    int N, double coff, const double *pos, int n, sdr_cpx_t *corr,
-    sdr_cpx_t *C);
 void sdr_corr_std_cpx(const sdr_cpx_t *buff, int len_buff, int ix, int N,
     double fs, double fc, double phi, const float *code, const double *pos,
     int n, sdr_cpx_t *corr);
