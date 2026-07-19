@@ -54,6 +54,11 @@
 //                   negative polarity in sdr_corr_std()
 //                   modify API sdr_corr_std()
 //  2026-07-17  1.27 make sdr_corr_std() real-only; drop code_Q/complex kernel
+//  2026-07-19  1.28 restore complex code path in sdr_corr_std() with fused
+//                   dot_IQ_code2_acc() (shared carrier mixing and IQ load)
+//                   modify API sdr_corr_std()
+//  2026-07-19  1.29 add API sdr_corr_std2() with separate code banks for the
+//                   part after the code wrap-around
 //                   remove API sdr_corr_std_cpx_code()
 //
 #include <math.h>
@@ -1088,6 +1093,95 @@ static void dot_IQ_code_acc(const sdr_cpx16_t *IQ, const int8_t *code,
     }
 }
 
+// accumulate 4 inner products of biased IQ data and 2 int8 codes (shared load) -
+static void dot_IQ_code2_acc(const sdr_cpx16_t *IQ, const int8_t *codeI,
+    const int8_t *codeQ, const int32_t *csumI, const int32_t *csumQ, int N,
+    int32_t *sII, int32_t *sIQ, int32_t *sQI, int32_t *sQQ)
+{
+    int i = 0;
+#if defined(AVX2)
+    __m256i yII = _mm256_setzero_si256(), yIQ = _mm256_setzero_si256();
+    __m256i yQI = _mm256_setzero_si256(), yQQ = _mm256_setzero_si256();
+    __m256i yones = _mm256_set1_epi16(1);
+    __m256i ydup = _mm256_setr_epi8(0,-1,1,-1,2,-1,3,-1, 4,-1,5,-1,6,-1,7,-1,
+        8,-1,9,-1,10,-1,11,-1, 12,-1,13,-1,14,-1,15,-1);
+    
+    for ( ; i < N - 15; i += 16) {
+        __m256i ydata = _mm256_loadu_si256((__m256i *)(IQ + i)); // biased u8
+        __m256i cI = _mm256_broadcastsi128_si256(
+            _mm_loadu_si128((const __m128i *)(codeI + i)));
+        __m256i cQ = _mm256_broadcastsi128_si256(
+            _mm_loadu_si128((const __m128i *)(codeQ + i)));
+        __m256i cII = _mm256_shuffle_epi8(cI, ydup); // (cI,0) pairs
+        __m256i cQI = _mm256_shuffle_epi8(cQ, ydup); // (cQ,0) pairs
+        yII = _mm256_add_epi32(yII, _mm256_madd_epi16(
+            _mm256_maddubs_epi16(ydata, cII), yones));
+        yIQ = _mm256_add_epi32(yIQ, _mm256_madd_epi16(
+            _mm256_maddubs_epi16(ydata, _mm256_slli_epi16(cII, 8)), yones));
+        yQI = _mm256_add_epi32(yQI, _mm256_madd_epi16(
+            _mm256_maddubs_epi16(ydata, cQI), yones));
+        yQQ = _mm256_add_epi32(yQQ, _mm256_madd_epi16(
+            _mm256_maddubs_epi16(ydata, _mm256_slli_epi16(cQI, 8)), yones));
+    }
+    int32_t aII[8], aIQ[8], aQI[8], aQQ[8];
+    _mm256_storeu_si256((__m256i *)aII, yII);
+    _mm256_storeu_si256((__m256i *)aIQ, yIQ);
+    _mm256_storeu_si256((__m256i *)aQI, yQI);
+    _mm256_storeu_si256((__m256i *)aQQ, yQQ);
+    int32_t bI = 128 * (csumI[i] - csumI[0]), bQ = 128 * (csumQ[i] - csumQ[0]);
+    for (int k = 0; k < 8; k++) {
+        *sII += aII[k]; *sIQ += aIQ[k]; *sQI += aQI[k]; *sQQ += aQQ[k];
+    }
+    *sII -= bI; *sIQ -= bI; *sQI -= bQ; *sQQ -= bQ;
+#elif defined(NEON) && defined(__ARM_FEATURE_DOTPROD)
+    int32x4_t yII = vdupq_n_s32(0), yIQ = vdupq_n_s32(0);
+    int32x4_t yQI = vdupq_n_s32(0), yQQ = vdupq_n_s32(0);
+    int8x16_t ybias = vdupq_n_s8(-128); // biased u8 ^ 0x80 -> signed
+    
+    for ( ; i < N - 15; i += 16) {
+        int8x16x2_t ydata = vld2q_s8((const int8_t *)(IQ + i));
+        int8x16_t dI = veorq_s8(ydata.val[0], ybias);
+        int8x16_t dQ = veorq_s8(ydata.val[1], ybias);
+        int8x16_t cI = vld1q_s8(codeI + i), cQ = vld1q_s8(codeQ + i);
+        yII = vdotq_s32(yII, dI, cI);
+        yIQ = vdotq_s32(yIQ, dQ, cI);
+        yQI = vdotq_s32(yQI, dI, cQ);
+        yQQ = vdotq_s32(yQQ, dQ, cQ);
+    }
+    *sII += vaddvq_s32(yII); *sIQ += vaddvq_s32(yIQ);
+    *sQI += vaddvq_s32(yQI); *sQQ += vaddvq_s32(yQQ);
+#elif defined(NEON)
+    int32x4_t yII = vdupq_n_s32(0), yIQ = vdupq_n_s32(0);
+    int32x4_t yQI = vdupq_n_s32(0), yQQ = vdupq_n_s32(0);
+    int8x8_t ybias = vdup_n_s8(-128); // biased u8 ^ 0x80 -> signed
+    
+    for ( ; i < N - 7; i += 8) {
+        int8x8x2_t ydata = vld2_s8((int8_t *)(IQ + i));
+        int8x8_t dI = veor_s8(ydata.val[0], ybias);
+        int8x8_t dQ = veor_s8(ydata.val[1], ybias);
+        int8x8_t cI = vld1_s8(codeI + i), cQ = vld1_s8(codeQ + i);
+        yII = vpadalq_s16(yII, vmull_s8(dI, cI));
+        yIQ = vpadalq_s16(yIQ, vmull_s8(dQ, cI));
+        yQI = vpadalq_s16(yQI, vmull_s8(dI, cQ));
+        yQQ = vpadalq_s16(yQQ, vmull_s8(dQ, cQ));
+    }
+    int32_t aII[4], aIQ[4], aQI[4], aQQ[4];
+    vst1q_s32(aII, yII); vst1q_s32(aIQ, yIQ);
+    vst1q_s32(aQI, yQI); vst1q_s32(aQQ, yQQ);
+    for (int k = 0; k < 4; k++) {
+        *sII += aII[k]; *sIQ += aIQ[k]; *sQI += aQI[k]; *sQQ += aQQ[k];
+    }
+#endif
+    (void)csumI; (void)csumQ;
+    for ( ; i < N; i++) { // biased u8 -> signed
+        int dI = (uint8_t)IQ[i].I - 128, dQ = (uint8_t)IQ[i].Q - 128;
+        *sII += dI * codeI[i];
+        *sIQ += dQ * codeI[i];
+        *sQI += dI * codeQ[i];
+        *sQQ += dQ * codeQ[i];
+    }
+}
+
 //------------------------------------------------------------------------------
 //  Standard correlator. Mix IF carrier to IF data and make multiple
 //  correlations with resampled spreading codes in a single fused pass. The
@@ -1102,6 +1196,8 @@ static void dot_IQ_code_acc(const sdr_cpx16_t *IQ, const int8_t *code,
 //      phi      (I) IF carrier phase offset (cyc)
 //      code     (I) resampled code bank (N x SDR_N_CODES)
 //      code_sum (I) prefix sums of code bank ((N + 1) x SDR_N_CODES)
+//      code_Q   (I) imag part of complex code bank (NULL for real code)
+//      code_sum_Q (I) prefix sums of imag code bank (NULL for real code)
 //      scale    (I) code amplitude scale (1 for -1/0/+1 codes)
 //      coff     (I) code offset (samples)
 //      pos      (I) correlator shift positions (n x 1) (samples)
@@ -1121,18 +1217,30 @@ static void dot_IQ_code_acc(const sdr_cpx16_t *IQ, const int8_t *code,
 //      code_sum[k*(N+1)+s] shall be the sum of the first s values of the
 //      code bank slice k (used to remove the +128 data bias of the
 //      uint8 x int8 inner products - see dot_IQ_code_acc()).
+//      For a complex code (code_Q != NULL), the carrier is mixed once and both
+//      real (code) and imag (code_Q) banks are correlated over the shared data
+//      as corr = sum(IQ * conj(code + j * code_Q)).
+//      code2* are the code banks for the part after the code wrap-around
+//      (NULL = same as code*). They allow a replica whose sideband combination
+//      sign differs across the wrap-around, which pol cannot express.
 //
-void sdr_corr_std(const sdr_buff_t *buff, int ix, int N, double fs,
+void sdr_corr_std2(const sdr_buff_t *buff, int ix, int N, double fs,
     double fc, double phi, const int8_t *code, const int32_t *code_sum,
-    int scale, double coff, const double *pos, int n, int pol,
-    sdr_cpx_t *corr, sdr_cpx_t *C)
+    const int8_t *code_Q, const int32_t *code_sum_Q, const int8_t *code2,
+    const int32_t *code2_sum, const int8_t *code2_Q,
+    const int32_t *code2_sum_Q, int scale, double coff, const double *pos,
+    int n, int pol, sdr_cpx_t *corr, sdr_cpx_t *C)
 {
     sdr_cpx16_t IQ[MIX_CORR_CHUNK];
     sdr_cpx_t corr1[SDR_MAX_CORR], corr2[SDR_MAX_CORR];
     int32_t s1I[SDR_MAX_CORR] = {0}, s1Q[SDR_MAX_CORR] = {0};
     int32_t s2I[SDR_MAX_CORR] = {0}, s2Q[SDR_MAX_CORR] = {0};
-    const int8_t *slice[SDR_MAX_CORR];
-    const int32_t *csums[SDR_MAX_CORR];
+    int32_t q1I[SDR_MAX_CORR] = {0}, q1Q[SDR_MAX_CORR] = {0};
+    int32_t q2I[SDR_MAX_CORR] = {0}, q2Q[SDR_MAX_CORR] = {0};
+    const int8_t *slice[SDR_MAX_CORR], *sliceQ[SDR_MAX_CORR];
+    const int32_t *csums[SDR_MAX_CORR], *csumsQ[SDR_MAX_CORR];
+    const int8_t *slice2[SDR_MAX_CORR], *slice2Q[SDR_MAX_CORR];
+    const int32_t *csums2[SDR_MAX_CORR], *csums2Q[SDR_MAX_CORR];
     int js[SDR_MAX_CORR];
     float dot_EPL = 0.0, sign, cscale = SDR_CSCALE / scale;
     double lscale = (double)(1 << 24) * NTBL;
@@ -1146,6 +1254,14 @@ void sdr_corr_std(const sdr_buff_t *buff, int ix, int N, double fs,
         js[i] = j;
         slice[i] = code + k * N;
         csums[i] = code_sum + k * (N + 1);
+        slice2[i] = (code2 ? code2 : code) + k * N;
+        csums2[i] = (code2_sum ? code2_sum : code_sum) + k * (N + 1);
+        if (code_Q) {
+            sliceQ[i] = code_Q + k * N;
+            csumsQ[i] = code_sum_Q + k * (N + 1);
+            slice2Q[i] = (code2_Q ? code2_Q : code_Q) + k * N;
+            csums2Q[i] = (code2_sum_Q ? code2_sum_Q : code_sum_Q) + k * (N + 1);
+        }
     }
     for (int c0 = 0; c0 < N; c0 += MIX_CORR_CHUNK) {
         int len = MIN(MIX_CORR_CHUNK, N - c0);
@@ -1165,20 +1281,37 @@ void sdr_corr_std(const sdr_buff_t *buff, int ix, int N, double fs,
         for (int i = 0; i < n; i++) {
             int j = js[i], a1 = MIN(c0 + len, j), b0 = MAX(c0, j);
             if (a1 > c0) {
-                dot_IQ_code_acc(IQ, slice[i] + N - j + c0,
+                if (code_Q) dot_IQ_code2_acc(IQ, slice[i] + N - j + c0,
+                    sliceQ[i] + N - j + c0, csums[i] + N - j + c0,
+                    csumsQ[i] + N - j + c0, a1 - c0, s1I + i, s1Q + i,
+                    q1I + i, q1Q + i);
+                else dot_IQ_code_acc(IQ, slice[i] + N - j + c0,
                     csums[i] + N - j + c0, a1 - c0, s1I + i, s1Q + i);
             }
             if (b0 < c0 + len) {
-                dot_IQ_code_acc(IQ + b0 - c0, slice[i] + b0 - j,
-                    csums[i] + b0 - j, c0 + len - b0, s2I + i, s2Q + i);
+                if (code_Q) dot_IQ_code2_acc(IQ + b0 - c0, slice2[i] + b0 - j,
+                    slice2Q[i] + b0 - j, csums2[i] + b0 - j,
+                    csums2Q[i] + b0 - j, c0 + len - b0, s2I + i, s2Q + i,
+                    q2I + i, q2Q + i);
+                else dot_IQ_code_acc(IQ + b0 - c0, slice2[i] + b0 - j,
+                    csums2[i] + b0 - j, c0 + len - b0, s2I + i, s2Q + i);
             }
         }
     }
-    for (int i = 0; i < n; i++) {
-        corr1[i][0] = s1I[i] * cscale;
-        corr1[i][1] = s1Q[i] * cscale;
-        corr2[i][0] = s2I[i] * cscale;
-        corr2[i][1] = s2Q[i] * cscale;
+    if (code_Q) { // conj(code + j code_Q): Re = sI + qQ, Im = sQ - qI
+        for (int i = 0; i < n; i++) {
+            corr1[i][0] = (s1I[i] + q1Q[i]) * cscale;
+            corr1[i][1] = (s1Q[i] - q1I[i]) * cscale;
+            corr2[i][0] = (s2I[i] + q2Q[i]) * cscale;
+            corr2[i][1] = (s2Q[i] - q2I[i]) * cscale;
+        }
+    } else {
+        for (int i = 0; i < n; i++) {
+            corr1[i][0] = s1I[i] * cscale;
+            corr1[i][1] = s1Q[i] * cscale;
+            corr2[i][0] = s2I[i] * cscale;
+            corr2[i][1] = s2Q[i] * cscale;
+        }
     }
     // detect polarity flip over code wrap-around (unless fixed by pol)
     for (int i = 0; i < 3; i++) {
@@ -1196,6 +1329,16 @@ void sdr_corr_std(const sdr_buff_t *buff, int ix, int N, double fs,
     }
 }
 
+// mix carrier and standard correlator (same code bank over the wrap-around) ----
+void sdr_corr_std(const sdr_buff_t *buff, int ix, int N, double fs,
+    double fc, double phi, const int8_t *code, const int32_t *code_sum,
+    const int8_t *code_Q, const int32_t *code_sum_Q, int scale, double coff,
+    const double *pos, int n, int pol, sdr_cpx_t *corr, sdr_cpx_t *C)
+{
+    sdr_corr_std2(buff, ix, N, fs, fc, phi, code, code_sum, code_Q, code_sum_Q,
+        NULL, NULL, NULL, NULL, scale, coff, pos, n, pol, corr, C);
+}
+
 // mix carrier and standard correlator for complex buffer (for python) ---------
 void sdr_corr_std_cpx(const sdr_cpx_t *buff, int len_buff, int ix, int N,
     double fs, double fc, double phi, const float *code, const double *pos,
@@ -1209,7 +1352,7 @@ void sdr_corr_std_cpx(const sdr_cpx_t *buff, int len_buff, int ix, int N,
         code_res[i] = (int8_t)floorf(code[i] * SDR_CBOC_SCALE + 0.5f);
         code_sum[i+1] = code_sum[i] + code_res[i];
     }
-    sdr_corr_std(buff_cpx8, 0, N, fs, fc, phi, code_res, code_sum,
+    sdr_corr_std(buff_cpx8, 0, N, fs, fc, phi, code_res, code_sum, NULL, NULL,
         SDR_CBOC_SCALE, 0.0, pos, n, 0, corr, C);
     sdr_free(code_res);
     sdr_free(code_sum);

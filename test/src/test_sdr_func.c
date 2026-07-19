@@ -219,7 +219,7 @@ static void test_sdr_corr_api(void)
         }
     }
 
-    sdr_corr_std(buff, 0, N, 4.0, 0.0, 0.0, code, code_sum, 1,
+    sdr_corr_std(buff, 0, N, 4.0, 0.0, 0.0, code, code_sum, NULL, NULL, 1,
         0.0, pos, npos, 0, corr, C);
     TEST_ASSERT_TRUE(isfinite(corr[0][0]));
     TEST_ASSERT_TRUE(isfinite(corr[0][1]));
@@ -327,7 +327,7 @@ static void test_sdr_corr_std_equiv(void)
     // without IF buffer wrap-around
     ref_corr_std(buff, 100, N, fs, fc, phi, code, NULL, 1, coff, pos, npos, 0,
         corr1, C1);
-    sdr_corr_std(buff, 100, N, fs, fc, phi, code, code_sum, 1,
+    sdr_corr_std(buff, 100, N, fs, fc, phi, code, code_sum, NULL, NULL, 1,
         coff, pos, npos, 0, corr2, C2);
     for (int i = 0; i < npos; i++) {
         TEST_ASSERT_NEAR(corr1[i][0], corr2[i][0], 1e-9);
@@ -340,7 +340,7 @@ static void test_sdr_corr_std_equiv(void)
     // across IF buffer wrap-around (phase re-quantized at the boundary)
     ref_corr_std(buff, 8000, N, fs, fc, phi, code, NULL, 1, coff, pos, npos,
         0, corr1, C1);
-    sdr_corr_std(buff, 8000, N, fs, fc, phi, code, code_sum, 1,
+    sdr_corr_std(buff, 8000, N, fs, fc, phi, code, code_sum, NULL, NULL, 1,
         coff, pos, npos, 0, corr2, C2);
     for (int i = 0; i < npos; i++) {
         TEST_ASSERT_NEAR(corr1[i][0], corr2[i][0], 1e-3);
@@ -356,7 +356,7 @@ static void test_sdr_corr_std_equiv(void)
     code_sum = gen_code_sum(code, N);
     ref_corr_std(buff, 100, N, fs, fc, phi, code, NULL, SDR_CBOC_SCALE, coff,
         pos, npos, 0, corr1, C1);
-    sdr_corr_std(buff, 100, N, fs, fc, phi, code, code_sum,
+    sdr_corr_std(buff, 100, N, fs, fc, phi, code, code_sum, NULL, NULL,
         SDR_CBOC_SCALE, coff, pos, npos, 0, corr2, C2);
     for (int i = 0; i < npos; i++) {
         TEST_ASSERT_NEAR(corr1[i][0], corr2[i][0], 1e-9);
@@ -371,14 +371,14 @@ static void test_sdr_corr_std_equiv(void)
     sdr_buff_free(buff);
 }
 
-// complex code = 2 real sdr_corr_std() + butterfly vs reference (see corr_cpx_bank)
+// complex code correlation in one sdr_corr_std() call vs reference ------------
 static void test_sdr_corr_std_cpx_code_equiv(void)
 {
     const int N = 9000, npos = 4;
     sdr_buff_t *buff = sdr_buff_new(12000, 2);
     int8_t *code = (int8_t *)sdr_malloc(sizeof(int8_t) * N * SDR_N_CODES);
     int8_t *code_Q = (int8_t *)sdr_malloc(sizeof(int8_t) * N * SDR_N_CODES);
-    sdr_cpx_t corr1[4], corr2[4], cI[4], cQ[4], C1[2], C2[2], CI[2], CQ[2];
+    sdr_cpx_t corr1[4], corr2[4], C1[2], C2[2];
     double pos[4] = {0.0, -3.3, 3.3, 7.7};
     double fs = 12e6, fc = 4250.0, phi = 0.678, coff = 2.5;
 
@@ -395,34 +395,96 @@ static void test_sdr_corr_std_cpx_code_equiv(void)
     int32_t *code_sum = gen_code_sum(code, N);
     int32_t *code_sum_Q = gen_code_sum(code_Q, N);
 
-    for (int pol = -1; pol <= 1; pol += 2) { // fixed polarity (auto-detect only
-        ref_corr_std(buff, 100, N, fs, fc, phi, code, code_Q, // agrees for real signals)
+    for (int pol = -1; pol <= 1; pol++) { // int32 butterfly is bit-exact
+        ref_corr_std(buff, 100, N, fs, fc, phi, code, code_Q,
             SDR_ALTBOC_SCALE, coff, pos, npos, pol, corr1, C1);
-        sdr_corr_std(buff, 100, N, fs, fc, phi, code, code_sum, SDR_ALTBOC_SCALE,
-            coff, pos, npos, pol, cI, CI);
-        sdr_corr_std(buff, 100, N, fs, fc, phi, code_Q, code_sum_Q,
-            SDR_ALTBOC_SCALE, coff, pos, npos, pol, cQ, CQ);
-        for (int i = 0; i < npos; i++) { // conj(cI + j * cQ) butterfly
-            corr2[i][0] = cI[i][0] + cQ[i][1];
-            corr2[i][1] = cI[i][1] - cQ[i][0];
+        sdr_corr_std(buff, 100, N, fs, fc, phi, code, code_sum, code_Q,
+            code_sum_Q, SDR_ALTBOC_SCALE, coff, pos, npos, pol, corr2, C2);
+        for (int i = 0; i < npos; i++) {
+            TEST_ASSERT_NEAR(corr1[i][0], corr2[i][0], 1e-9);
+            TEST_ASSERT_NEAR(corr1[i][1], corr2[i][1], 1e-9);
         }
         for (int i = 0; i < 2; i++) {
-            C2[i][0] = CI[i][0] + CQ[i][1];
-            C2[i][1] = CI[i][1] - CQ[i][0];
-        }
-        for (int i = 0; i < npos; i++) { // float-level butterfly (not int32)
-            TEST_ASSERT_NEAR(corr1[i][0], corr2[i][0], 1e-4);
-            TEST_ASSERT_NEAR(corr1[i][1], corr2[i][1], 1e-4);
-        }
-        for (int i = 0; i < 2; i++) { // C is unnormalized (~N x corr)
-            TEST_ASSERT_NEAR(C1[0][i], C2[0][i], 1e-2);
-            TEST_ASSERT_NEAR(C1[1][i], C2[1][i], 1e-2);
+            TEST_ASSERT_NEAR(C1[0][i], C2[0][i], 1e-9);
+            TEST_ASSERT_NEAR(C1[1][i], C2[1][i], 1e-9);
         }
     }
     sdr_free(code_sum_Q);
     sdr_free(code_sum);
     sdr_free(code_Q);
     sdr_free(code);
+    sdr_buff_free(buff);
+}
+
+// pre-combined E5ABQ replica (1 call) == 2 sideband correlations combined -----
+static void test_sdr_corr_std2_precombined(void)
+{
+    const int N = 9000, npos = 4, NC = N * SDR_N_CODES;
+    sdr_buff_t *buff = sdr_buff_new(12000, 2);
+    int8_t *aI = (int8_t *)sdr_malloc(NC), *aQ = (int8_t *)sdr_malloc(NC);
+    int8_t *bI = (int8_t *)sdr_malloc(NC), *bQ = (int8_t *)sdr_malloc(NC);
+    int8_t *pI = (int8_t *)sdr_malloc(NC), *pQ = (int8_t *)sdr_malloc(NC);
+    int8_t *mI = (int8_t *)sdr_malloc(NC), *mQ = (int8_t *)sdr_malloc(NC);
+    sdr_cpx_t Ca[4], Cb[4], C1a[2], C1b[2], corr[4], C[2];
+    double pos[4] = {0.0, -3.3, 3.3, 7.7};
+    double fs = 12e6, fc = 4250.0, phi = 0.678, coff = 2.5;
+
+    for (int i = 0; i < buff->N; i++) {
+        buff->data[i] = pack_cpx8(i % 7 - 3, 3 - i % 5);
+    }
+    for (int i = 0; i < NC; i++) { // AltBOC-like stairs (|a|,|b| <= 32)
+        aI[i] = (int8_t)((i % 4) * 21 - 32);
+        aQ[i] = (int8_t)((i % 5) * 16 - 32);
+        bI[i] = (int8_t)((i % 3) * 32 - 32);
+        bQ[i] = (int8_t)((i % 7) * 10 - 30);
+        pI[i] = (int8_t)(aI[i] + bI[i]);
+        pQ[i] = (int8_t)(aQ[i] + bQ[i]);
+        mI[i] = (int8_t)(aI[i] - bI[i]);
+        mQ[i] = (int8_t)(aQ[i] - bQ[i]);
+    }
+    int32_t *sAI = gen_code_sum(aI, N), *sAQ = gen_code_sum(aQ, N);
+    int32_t *sBI = gen_code_sum(bI, N), *sBQ = gen_code_sum(bQ, N);
+    int32_t *sPI = gen_code_sum(pI, N), *sPQ = gen_code_sum(pQ, N);
+    int32_t *sMI = gen_code_sum(mI, N), *sMQ = gen_code_sum(mQ, N);
+
+    for (int c = 0; c < 16; c++) { // all sec-code chip pair combinations
+        int sa1 = (c & 1) ? 1 : -1, sa2 = (c & 2) ? 1 : -1;
+        int sb1 = (c & 4) ? 1 : -1, sb2 = (c & 8) ? 1 : -1;
+        for (int pol = -1; pol <= 1; pol += 2) {
+            int k1 = pol * sa1 * sb1, k2 = pol * sa2 * sb2;
+
+            // reference: correlate the sidebands separately and combine
+            sdr_corr_std(buff, 100, N, fs, fc, phi, aI, sAI, aQ, sAQ,
+                SDR_ALTBOC_SCALE, coff, pos, npos, sa1 * sa2, Ca, C1a);
+            sdr_corr_std(buff, 100, N, fs, fc, phi, bI, sBI, bQ, sBQ,
+                SDR_ALTBOC_SCALE, coff, pos, npos, sb1 * sb2, Cb, C1b);
+
+            // one correlation with the pre-combined replica (a+b or a-b)
+            sdr_corr_std2(buff, 100, N, fs, fc, phi,
+                k1 > 0 ? pI : mI, k1 > 0 ? sPI : sMI,
+                k1 > 0 ? pQ : mQ, k1 > 0 ? sPQ : sMQ,
+                k2 > 0 ? pI : mI, k2 > 0 ? sPI : sMI,
+                k2 > 0 ? pQ : mQ, k2 > 0 ? sPQ : sMQ,
+                SDR_ALTBOC_SCALE * 2, coff, pos, npos, sa1 * sa2, corr, C);
+
+            for (int i = 0; i < npos; i++) {
+                TEST_ASSERT_NEAR((Ca[i][0] + k1 * Cb[i][0]) * 0.5f,
+                    corr[i][0], 1e-5);
+                TEST_ASSERT_NEAR((Ca[i][1] + k1 * Cb[i][1]) * 0.5f,
+                    corr[i][1], 1e-5);
+            }
+            for (int i = 0; i < 2; i++) { // C is unnormalized (~N x corr)
+                TEST_ASSERT_NEAR((C1a[0][i] + k1 * C1b[0][i]) * 0.5f,
+                    C[0][i], 1e-2);
+                TEST_ASSERT_NEAR((C1a[1][i] + k2 * C1b[1][i]) * 0.5f,
+                    C[1][i], 1e-2);
+            }
+        }
+    }
+    sdr_free(sAI); sdr_free(sAQ); sdr_free(sBI); sdr_free(sBQ);
+    sdr_free(sPI); sdr_free(sPQ); sdr_free(sMI); sdr_free(sMQ);
+    sdr_free(aI); sdr_free(aQ); sdr_free(bI); sdr_free(bQ);
+    sdr_free(pI); sdr_free(pQ); sdr_free(mI); sdr_free(mQ);
     sdr_buff_free(buff);
 }
 
@@ -631,6 +693,7 @@ int main(void)
     TEST_RUN(test_sdr_corr_api);
     TEST_RUN(test_sdr_corr_std_equiv);
     TEST_RUN(test_sdr_corr_std_cpx_code_equiv);
+    TEST_RUN(test_sdr_corr_std2_precombined);
     TEST_RUN(test_sdr_search_helper_api);
     TEST_RUN(test_sdr_psd_api);
     TEST_RUN(test_sdr_stream_api);

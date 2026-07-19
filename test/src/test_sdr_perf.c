@@ -230,14 +230,13 @@ static void bench_mix_carr(void *ctx)
     perf_sink += p->IQ[0].I;
 }
 
-// benchmark sdr_corr_std() with complex code (2 real correlations) ------------
+// benchmark sdr_corr_std() with complex code (shared carrier mixing) ----------
 static void bench_corr_std_cpx_code(void *ctx)
 {
     corr_std_ctx_t *p = (corr_std_ctx_t *)ctx;
     sdr_corr_std(&p->buff, 17, p->N, 24e6, -4200.0, 0.125, p->code,
-        p->code_sum, 1, 0.35, p->pos, 4, 0, p->corr, p->C);
-    sdr_corr_std(&p->buff, 17, p->N, 24e6, -4200.0, 0.125, p->code_Q,
-        p->code_sum_Q, 1, 0.35, p->pos, 4, 0, p->corr, p->C);
+        p->code_sum, p->code_Q, p->code_sum_Q, 1, 0.35, p->pos, 4, 0, p->corr,
+        p->C);
     perf_sink += p->corr[0][0];
 }
 
@@ -246,7 +245,7 @@ static void bench_corr_std(void *ctx)
 {
     corr_std_ctx_t *p = (corr_std_ctx_t *)ctx;
     sdr_corr_std(&p->buff, 17, p->N, 24e6, -4200.0, 0.125, p->code,
-        p->code_sum, 1, 0.35, p->pos, 4, 0, p->corr, p->C);
+        p->code_sum, NULL, NULL, 1, 0.35, p->pos, 4, 0, p->corr, p->C);
     perf_sink += p->corr[0][0];
 }
 

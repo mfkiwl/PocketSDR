@@ -424,8 +424,14 @@ double sdr_shift_freq(const char *sig, int fcn, double fi);
 float *sdr_dop_bins(double T, float dop, float max_dop, int *len_fds);
 void sdr_corr_std(const sdr_buff_t *buff, int ix, int N, double fs,
     double fc, double phi, const int8_t *code, const int32_t *code_sum,
-    int scale, double coff, const double *pos, int n, int pol,
-    sdr_cpx_t *corr, sdr_cpx_t *C);
+    const int8_t *code_Q, const int32_t *code_sum_Q, int scale, double coff,
+    const double *pos, int n, int pol, sdr_cpx_t *corr, sdr_cpx_t *C);
+void sdr_corr_std2(const sdr_buff_t *buff, int ix, int N, double fs,
+    double fc, double phi, const int8_t *code, const int32_t *code_sum,
+    const int8_t *code_Q, const int32_t *code_sum_Q, const int8_t *code2,
+    const int32_t *code2_sum, const int8_t *code2_Q,
+    const int32_t *code2_sum_Q, int scale, double coff, const double *pos,
+    int n, int pol, sdr_cpx_t *corr, sdr_cpx_t *C);
 void sdr_corr_std_cpx(const sdr_cpx_t *buff, int len_buff, int ix, int N,
     double fs, double fc, double phi, const float *code, const double *pos,
     int n, sdr_cpx_t *corr);

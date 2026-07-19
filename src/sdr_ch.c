@@ -35,6 +35,8 @@
 //  2026-07-17  1.24 correlate E5 AltBOC sidebands separately with real code
 //                   banks and combine them after correlation
 //                   support sdr_corr_std() API change
+//  2026-07-19  1.25 add pre-combined E5ABQ replicas (a+b, a-b) to correlate
+//                   both sidebands in one pass once the polarity is calibrated
 //
 #include <ctype.h>
 #include <math.h>
@@ -157,7 +159,8 @@ static void gen_e5abq_code_fft(int prn, double T, double fs, int N,
     }
 }
 
-// E5ABQ tracking code banks (aI,aQ,bI,bQ; a=E5aQ*SC_E5aI, b=E5bQ*SC_E5bI) ------
+// E5ABQ tracking code banks (aI,aQ,bI,bQ,pI,pQ,mI,mQ; a=E5aQ*SC_E5aI,
+// b=E5bQ*SC_E5bI, p=a+b, m=a-b: p/m are the pre-combined sideband replicas) ----
 static void gen_e5abq_banks(int prn, double T, double fs, int N, int8_t *code)
 {
     int8_t *I[2], *Q[2];
@@ -179,6 +182,23 @@ static void gen_e5abq_banks(int prn, double T, double fs, int N, int8_t *code)
                 pI[s] = tmp[s].I;
                 pQ[s] = tmp[s].Q;
             }
+        }
+    }
+    // pre-combined replicas: bank 4,5 = a+b (k=+1), bank 6,7 = a-b (k=-1)
+    for (int k = 0; k < SDR_N_CODES; k++) {
+        const int8_t *aI = code + (0 * SDR_N_CODES + k) * N;
+        const int8_t *aQ = code + (1 * SDR_N_CODES + k) * N;
+        const int8_t *bI = code + (2 * SDR_N_CODES + k) * N;
+        const int8_t *bQ = code + (3 * SDR_N_CODES + k) * N;
+        int8_t *pI = code + (4 * SDR_N_CODES + k) * N;
+        int8_t *pQ = code + (5 * SDR_N_CODES + k) * N;
+        int8_t *mI = code + (6 * SDR_N_CODES + k) * N;
+        int8_t *mQ = code + (7 * SDR_N_CODES + k) * N;
+        for (int s = 0; s < N; s++) { // |a|,|b| <= SDR_ALTBOC_SCALE: fits int8
+            pI[s] = (int8_t)(aI[s] + bI[s]);
+            pQ[s] = (int8_t)(aQ[s] + bQ[s]);
+            mI[s] = (int8_t)(aI[s] - bI[s]);
+            mQ[s] = (int8_t)(aQ[s] - bQ[s]);
         }
     }
     sdr_free(tmp);
@@ -206,28 +226,6 @@ static void cal_e5abq_pol(sdr_ch_t *ch, const sdr_cpx_t *C1a,
     }
 }
 
-// correlate with a complex code as I/Q real banks (2 real correlations) --------
-static void corr_cpx_bank(const sdr_buff_t *buff, int ix, int N, double fs,
-    double fc, double phi, const int8_t *codeI, const int32_t *csumI,
-    const int8_t *codeQ, const int32_t *csumQ, int scale, double coff,
-    const double *pos, int n, int pol, sdr_cpx_t *corr, sdr_cpx_t *C)
-{
-    sdr_cpx_t cI[SDR_MAX_CORR], cQ[SDR_MAX_CORR], CI[2], CQ[2];
-    sdr_corr_std(buff, ix, N, fs, fc, phi, codeI, csumI, scale, coff, pos, n,
-        pol, cI, CI);
-    sdr_corr_std(buff, ix, N, fs, fc, phi, codeQ, csumQ, scale, coff, pos, n,
-        pol, cQ, CQ);
-    // conj(cI + j * cQ): Re = cI.re + cQ.im, Im = cI.im - cQ.re
-    for (int i = 0; i < n; i++) {
-        corr[i][0] = cI[i][0] + cQ[i][1];
-        corr[i][1] = cI[i][1] - cQ[i][0];
-    }
-    for (int i = 0; i < 2; i++) {
-        C[i][0] = CI[i][0] + CQ[i][1];
-        C[i][1] = CI[i][1] - CQ[i][0];
-    }
-}
-
 // mix carrier and correlate E5 AltBOC sidebands (a,b) and combine them ---------
 static void corr_e5abq(sdr_ch_t *ch, const sdr_buff_t *buff, int ix, double fc,
     sdr_cpx_t *C1)
@@ -239,7 +237,7 @@ static void corr_e5abq(sdr_ch_t *ch, const sdr_buff_t *buff, int ix, double fc,
     double coff = ch->coff * ch->fs;
 
     if (trk->sec_sync <= 0) { // E5aQ sideband only until sec-code sync
-        corr_cpx_bank(buff, ix, ch->N, ch->fs, fc, ch->phi, trk->code,
+        sdr_corr_std(buff, ix, ch->N, ch->fs, fc, ch->phi, trk->code,
             trk->code_sum, trk->code + NB, trk->code_sum + NS,
             SDR_ALTBOC_SCALE, coff, trk->pos, n, 0, trk->C, C1);
         return;
@@ -249,13 +247,24 @@ static void corr_e5abq(sdr_ch_t *ch, const sdr_buff_t *buff, int ix, double fc,
     int idx = (ch->lock - trk->sec_sync + N1) % N1, idx2 = (idx + 1) % N1;
     int sa1 = ch->sec_code[idx], sa2 = ch->sec_code[idx2];
     int sb1 = ch->sec_code2[idx % N2], sb2 = ch->sec_code2[idx2 % N2];
-    int pol = trk->e5b_pol ? trk->e5b_pol :
-        (trk->e5b_score < 0.0 ? -1 : 1); // running estimate while calib.
 
-    corr_cpx_bank(buff, ix, ch->N, ch->fs, fc, ch->phi, trk->code,
+    if (trk->e5b_pol) { // calibrated: one correlation with pre-combined replica
+        int j1 = trk->e5b_pol * sa1 * sb1 > 0 ? 4 : 6; // bank a+b or a-b
+        int j2 = trk->e5b_pol * sa2 * sb2 > 0 ? 4 : 6; // after the wrap-around
+        sdr_corr_std2(buff, ix, ch->N, ch->fs, fc, ch->phi,
+            trk->code + NB * j1, trk->code_sum + NS * j1,
+            trk->code + NB * (j1 + 1), trk->code_sum + NS * (j1 + 1),
+            trk->code + NB * j2, trk->code_sum + NS * j2,
+            trk->code + NB * (j2 + 1), trk->code_sum + NS * (j2 + 1),
+            SDR_ALTBOC_SCALE * 2, coff, trk->pos, n, sa1 * sa2, trk->C, C1);
+        return;
+    }
+    int pol = trk->e5b_score < 0.0 ? -1 : 1; // running estimate while calib.
+
+    sdr_corr_std(buff, ix, ch->N, ch->fs, fc, ch->phi, trk->code,
         trk->code_sum, trk->code + NB, trk->code_sum + NS, SDR_ALTBOC_SCALE,
         coff, trk->pos, n, sa1 * sa2, Ca, C1a);
-    corr_cpx_bank(buff, ix, ch->N, ch->fs, fc, ch->phi, trk->code + NB * 2,
+    sdr_corr_std(buff, ix, ch->N, ch->fs, fc, ch->phi, trk->code + NB * 2,
         trk->code_sum + NS * 2, trk->code + NB * 3, trk->code_sum + NS * 3,
         SDR_ALTBOC_SCALE, coff, trk->pos, n, sb1 * sb2, Cb, C1b);
 
@@ -269,9 +278,7 @@ static void corr_e5abq(sdr_ch_t *ch, const sdr_buff_t *buff, int ix, double fc,
         C1[0][i] = (C1a[0][i] + k1 * C1b[0][i]) * 0.5f;
         C1[1][i] = (C1a[1][i] + k2 * C1b[1][i]) * 0.5f;
     }
-    if (!trk->e5b_pol) {
-        cal_e5abq_pol(ch, C1a, C1b, sa1 * sb1, sa2 * sb2);
-    }
+    cal_e5abq_pol(ch, C1a, C1b, sa1 * sb1, sa2 * sb2);
 }
 
 // new signal acquisition ------------------------------------------------------
@@ -365,9 +372,9 @@ static sdr_trk_t *trk_new(const char *sig, int prn, const int8_t *code,
         gen_csk_code_fft(code, len_code, !strcmp(sig, "L6E") ? 1 : 0,
             trk->code_fft);
     }
-    int nb = !strcmp(sig, "E5ABQ") ? 4 : 1; // number of code banks
+    int nb = !strcmp(sig, "E5ABQ") ? 8 : 1; // number of code banks
     trk->code = (int8_t *)sdr_malloc(sizeof(int8_t) * N * SDR_N_CODES * nb);
-    if (nb == 4) {
+    if (nb == 8) {
         gen_e5abq_banks(prn, T, fs, N, trk->code);
     } else {
         sdr_cpx16_t *tmp = (sdr_cpx16_t *)sdr_malloc(sizeof(sdr_cpx16_t) * N);
@@ -855,7 +862,7 @@ static void track_sig(sdr_ch_t *ch, double time, const sdr_buff_t *buff, int ix)
         sdr_cpx_t C1[2];
         sdr_corr_std(buff, ix + i, ch->N, ch->fs, fc,
             ch->phi + fc * i / ch->fs, ch->trk->code, ch->trk->code_sum,
-            ch->trk->code_scale, ch->coff * ch->fs - i + csk * R,
+            NULL, NULL, ch->trk->code_scale, ch->coff * ch->fs - i + csk * R,
             ch->trk->pos, ch->trk->npos + ch->trk->nposx, 1, ch->trk->C, C1);
         
         // add P correlator outputs to history 
@@ -869,7 +876,7 @@ static void track_sig(sdr_ch_t *ch, double time, const sdr_buff_t *buff, int ix)
         } else {
             // standard correlator (carrier mixing fused)
             sdr_corr_std(buff, ix, ch->N, ch->fs, fc, ch->phi, ch->trk->code,
-                ch->trk->code_sum, ch->trk->code_scale,
+                ch->trk->code_sum, NULL, NULL, ch->trk->code_scale,
                 ch->coff * ch->fs, ch->trk->pos,
                 ch->trk->npos + ch->trk->nposx, 0, ch->trk->C, C1);
         }
