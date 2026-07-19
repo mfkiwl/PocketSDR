@@ -11,6 +11,7 @@
 //  History:
 //  2024-04-28  1.0  new
 //  2024-12-30  1.1  add and update log contents
+//  2026-07-17  1.2  widen pseudorange lower bound for GEO/IGSO epoch seeding
 //                   add nav data consistency tests
 //
 #include "pocket_sdr.h"
@@ -753,7 +754,10 @@ static double gen_prng(gtime_t time, const sdr_ch_t *ch)
     } else {
         return 0.0;
     }
-    if (tau < 0.05 || tau > 0.167) { // reject physically invalid pseudorange
+    // reject invalid pseudorange (the lower bound allows the common epoch
+    // offset when a GEO/IGSO satellite seeds init_epoch with the 0.07 s MEO
+    // nominal - a receiver clock bias absorbed by the PVT solution)
+    if (tau < -0.02 || tau > 0.167) {
         sdr_log(3, "$LOG,%.3f,%s,%s,%d,PSEUDORANGE OUT OF RANGE (%.6f)",
             ch->time, ch->sat, ch->sig, ch->prn, tau);
         return 0.0;
