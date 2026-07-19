@@ -44,6 +44,17 @@
 //                   modify API sdr_corr_std()
 //  2026-07-08  1.23 support int8 code values in sdr_corr_std() for CBOC
 //                   modify API sdr_corr_std()
+//  2026-07-08  1.24 support int8 complex code values in sdr_corr_std_cpx_code()
+//                   for E5 AltBOC
+//                   modify API sdr_corr_std_cpx_code()
+//  2026-07-14  1.25 support separate codes for before/after the code
+//                   wrap-around in sdr_corr_std_cpx_code()
+//                   modify API sdr_corr_std_cpx_code()
+//  2026-07-17  1.26 support complex codes as I/Q real code banks and fixed
+//                   negative polarity in sdr_corr_std()
+//                   modify API sdr_corr_std()
+//  2026-07-17  1.27 make sdr_corr_std() real-only; drop code_Q/complex kernel
+//                   remove API sdr_corr_std_cpx_code()
 //
 #include <math.h>
 #include <stdarg.h>
@@ -92,9 +103,7 @@ struct sdr_lpf_tag {              // LPF state struct
 
 // global variables ------------------------------------------------------------
 static sdr_cpx16_t mix_tbl[NTBL*256] = {{0,0}}; // carrier-mixed-data LUT
-#if defined(AVX2)
 static sdr_cpx16_t mix_tbl_b[NTBL*256] = {{0,0}}; // LUT biased by +128 (u8)
-#endif
 static fftwf_plan fftw_plans[MAX_FFTW_PLAN][2] = {{0}}; // FFTW plan buffer
 static int fftw_size[MAX_FFTW_PLAN] = {0}; // FFTW plan sizes
 static int log_lvl = 3;            // log level
@@ -147,10 +156,8 @@ void sdr_func_init(const char *file)
             int8_t I = SDR_CPX8_I(j), Q = SDR_CPX8_Q(j);
             mix_tbl[(j << 8) + i].I = I * carr_I - Q * carr_Q;
             mix_tbl[(j << 8) + i].Q = I * carr_Q + Q * carr_I;
-#if defined(AVX2)
             mix_tbl_b[(j << 8) + i].I = mix_tbl[(j << 8) + i].I ^ (int8_t)0x80;
             mix_tbl_b[(j << 8) + i].Q = mix_tbl[(j << 8) + i].Q ^ (int8_t)0x80;
-#endif
         }
     }
     // enable escape sequence for Windows console
@@ -916,7 +923,7 @@ static void cvt_cpx16(const sdr_cpx16_t *IQ, int N, sdr_cpx_t *cpx)
     int i = 0;
 #if defined(AVX2)
     __m256 ys = _mm256_set1_ps(SDR_CSCALE);
-
+    
     for ( ; i < N - 3; i += 4) { // 4 samples = 8 x int8
         __m128i xiq = _mm_loadl_epi64((const __m128i *)(IQ + i));
         __m256 yiq = _mm256_cvtepi32_ps(_mm256_cvtepi8_epi32(xiq));
@@ -924,7 +931,7 @@ static void cvt_cpx16(const sdr_cpx16_t *IQ, int N, sdr_cpx_t *cpx)
     }
 #elif defined(NEON)
     float32x4_t ys = vdupq_n_f32(SDR_CSCALE);
-
+    
     for ( ; i < N - 3; i += 4) { // 4 samples = 8 x int8
         int16x8_t yiq = vmovl_s8(vld1_s8((const int8_t *)(IQ + i)));
         float32x4_t y0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(yiq)));
@@ -1012,10 +1019,9 @@ static sdr_buff_t *buff_new_cpx(const sdr_cpx_t *buff, int len_buff, int ix,
     return buff_cpx8;
 }
 
-// accumulate inner product of IQ data and code (int8 code values) ---------------
-// (AVX2: IQ shall be biased by +128 as unsigned - see sdr_corr_std())
+// accumulate inner product of +128-biased IQ data and int8 code (csum debias) --
 static void dot_IQ_code_acc(const sdr_cpx16_t *IQ, const int8_t *code,
-    int N, int32_t *sumI, int32_t *sumQ)
+    const int32_t *csum, int N, int32_t *sumI, int32_t *sumQ)
 {
     int i = 0;
 #if defined(AVX2)
@@ -1024,7 +1030,7 @@ static void dot_IQ_code_acc(const sdr_cpx16_t *IQ, const int8_t *code,
     __m256i yones = _mm256_set1_epi16(1);
     __m256i ydupI = _mm256_setr_epi8(0,-1,1,-1,2,-1,3,-1, 4,-1,5,-1,6,-1,7,-1,
         8,-1,9,-1,10,-1,11,-1, 12,-1,13,-1,14,-1,15,-1);
-
+    
     for ( ; i < N - 15; i += 16) {
         __m256i ydata = _mm256_loadu_si256((__m256i *)(IQ + i)); // biased u8
         __m256i ycode8 = _mm256_broadcastsi128_si256(
@@ -1039,29 +1045,35 @@ static void dot_IQ_code_acc(const sdr_cpx16_t *IQ, const int8_t *code,
     int32_t sI[8], sQ[8];
     _mm256_storeu_si256((__m256i *)sI, ysumI);
     _mm256_storeu_si256((__m256i *)sQ, ysumQ);
-    *sumI += sI[0] + sI[1] + sI[2] + sI[3] + sI[4] + sI[5] + sI[6] + sI[7];
-    *sumQ += sQ[0] + sQ[1] + sQ[2] + sQ[3] + sQ[4] + sQ[5] + sQ[6] + sQ[7];
+    // remove data bias: sum((d+128)*c) = sum(d*c) + 128*sum(c)
+    int32_t b = 128 * (csum[i] - csum[0]);
+    *sumI += sI[0] + sI[1] + sI[2] + sI[3] + sI[4] + sI[5] + sI[6] + sI[7] - b;
+    *sumQ += sQ[0] + sQ[1] + sQ[2] + sQ[3] + sQ[4] + sQ[5] + sQ[6] + sQ[7] - b;
 #elif defined(NEON) && defined(__ARM_FEATURE_DOTPROD)
     int32x4_t ysumI = vdupq_n_s32(0);
     int32x4_t ysumQ = vdupq_n_s32(0);
-
+    int8x16_t ybias = vdupq_n_s8(-128); // biased u8 ^ 0x80 -> signed
+    
     for ( ; i < N - 15; i += 16) {
         int8x16x2_t ydata = vld2q_s8((const int8_t *)(IQ + i));
         int8x16_t ycode = vld1q_s8(code + i); // int8, I=Q
-        ysumI = vdotq_s32(ysumI, ydata.val[0], ycode);
-        ysumQ = vdotq_s32(ysumQ, ydata.val[1], ycode);
+        ysumI = vdotq_s32(ysumI, veorq_s8(ydata.val[0], ybias), ycode);
+        ysumQ = vdotq_s32(ysumQ, veorq_s8(ydata.val[1], ybias), ycode);
     }
     *sumI += vaddvq_s32(ysumI);
     *sumQ += vaddvq_s32(ysumQ);
 #elif defined(NEON)
     int32x4_t ysumI = vdupq_n_s32(0);
     int32x4_t ysumQ = vdupq_n_s32(0);
-
+    int8x8_t ybias = vdup_n_s8(-128); // biased u8 ^ 0x80 -> signed
+    
     for ( ; i < N - 7; i += 8) {
         int8x8x2_t ydata = vld2_s8((int8_t *)(IQ + i));
         int8x8_t ycode = vld1_s8(code + i); // int8, I=Q
-        ysumI = vpadalq_s16(ysumI, vmull_s8(ydata.val[0], ycode));
-        ysumQ = vpadalq_s16(ysumQ, vmull_s8(ydata.val[1], ycode));
+        ysumI = vpadalq_s16(ysumI, vmull_s8(veor_s8(ydata.val[0], ybias),
+            ycode));
+        ysumQ = vpadalq_s16(ysumQ, vmull_s8(veor_s8(ydata.val[1], ybias),
+            ycode));
     }
     int32_t sI[4], sQ[4];
     vst1q_s32(sI, ysumI);
@@ -1069,59 +1081,11 @@ static void dot_IQ_code_acc(const sdr_cpx16_t *IQ, const int8_t *code,
     *sumI += sI[0] + sI[1] + sI[2] + sI[3];
     *sumQ += sQ[0] + sQ[1] + sQ[2] + sQ[3];
 #endif
-    for ( ; i < N; i++) {
-#if defined(AVX2) // biased sum (data bias removed in sdr_corr_std())
-        *sumI += (uint8_t)IQ[i].I * code[i];
-        *sumQ += (uint8_t)IQ[i].Q * code[i];
-#else
-        *sumI += IQ[i].I * code[i];
-        *sumQ += IQ[i].Q * code[i];
-#endif
+    (void)csum;
+    for ( ; i < N; i++) { // biased u8 -> signed
+        *sumI += ((uint8_t)IQ[i].I - 128) * code[i];
+        *sumQ += ((uint8_t)IQ[i].Q - 128) * code[i];
     }
-}
-
-// inner product of IQ data and complex code -----------------------------------
-static void dot_IQ_cpx_code(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code,
-    int N, float s, sdr_cpx_t *c)
-{
-    int i = 0;
-    (*c)[0] = (*c)[1] = 0.0f;
-#if defined(AVX2)
-    __m256i ysumR = _mm256_setzero_si256();
-    __m256i ysumI = _mm256_setzero_si256();
-    __m256i yones8 = _mm256_set1_epi8(1);
-    __m256i yones16 = _mm256_set1_epi16(1);
-    __m256i yswap = _mm256_setr_epi8(
-        1,0, 3,2, 5,4, 7,6, 9,8,11,10,13,12,15,14,
-        1,0, 3,2, 5,4, 7,6, 9,8,11,10,13,12,15,14);
-    __m256i ymaskI = _mm256_setr_epi8(
-        1,-1, 1,-1, 1,-1, 1,-1, 1,-1, 1,-1, 1,-1, 1,-1,
-        1,-1, 1,-1, 1,-1, 1,-1, 1,-1, 1,-1, 1,-1, 1,-1);
-
-    for ( ; i < N - 15; i += 16) {
-        __m256i ydata = _mm256_loadu_si256((__m256i *)(IQ + i));
-        __m256i ycode = _mm256_loadu_si256((__m256i *)(code + i));
-        __m256i ycorrR = _mm256_sign_epi8(ydata, ycode);
-        __m256i ycodeI = _mm256_sign_epi8(ycode, ymaskI);
-        __m256i ydataI = _mm256_shuffle_epi8(ydata, yswap);
-        __m256i ycorrI = _mm256_sign_epi8(ydataI, ycodeI);
-        __m256i yprodR = _mm256_maddubs_epi16(yones8, ycorrR);
-        __m256i yprodI = _mm256_maddubs_epi16(yones8, ycorrI);
-        ysumR = _mm256_add_epi32(ysumR, _mm256_madd_epi16(yprodR, yones16));
-        ysumI = _mm256_add_epi32(ysumI, _mm256_madd_epi16(yprodI, yones16));
-    }
-    int32_t sR[8], sI[8];
-    _mm256_storeu_si256((__m256i *)sR, ysumR);
-    _mm256_storeu_si256((__m256i *)sI, ysumI);
-    (*c)[0] = sR[0] + sR[1] + sR[2] + sR[3] + sR[4] + sR[5] + sR[6] + sR[7];
-    (*c)[1] = sI[0] + sI[1] + sI[2] + sI[3] + sI[4] + sI[5] + sI[6] + sI[7];
-#endif
-    for ( ; i < N; i++) {
-        (*c)[0] += IQ[i].I * code[i].I + IQ[i].Q * code[i].Q;
-        (*c)[1] += IQ[i].Q * code[i].I - IQ[i].I * code[i].Q;
-    }
-    (*c)[0] *= s * SDR_CSCALE;
-    (*c)[1] *= s * SDR_CSCALE;
 }
 
 //------------------------------------------------------------------------------
@@ -1142,7 +1106,7 @@ static void dot_IQ_cpx_code(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code,
 //      coff     (I) code offset (samples)
 //      pos      (I) correlator shift positions (n x 1) (samples)
 //      n        (I) size of pos (number of correlators)
-//      pol      (I) code polarity over wrap-around (0:detect flip,1:fixed)
+//      pol      (I) code polarity over wrap-around (0:detect flip,+1/-1:fixed)
 //      corr     (O) correlations as sdr_cpx_t array (n x 1)
 //      C        (O) correlations before and after bit transition
 //
@@ -1152,10 +1116,11 @@ static void dot_IQ_cpx_code(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code,
 //  notes:
 //      The value of spreading codes shall be int8_t. Correlations are
 //      normalized by the code amplitude scale. To guarantee no overflow of
-//      the int32_t accumulators, N * 255 * max|code| shall be < 2^31.
+//      the int32_t accumulators, N * 127 * max|code| shall be < 2^31.
 //      The code bank is stored as int8_t (1 byte/sample, I=Q implied).
 //      code_sum[k*(N+1)+s] shall be the sum of the first s values of the
-//      code bank slice k (used to remove the data bias on AVX2).
+//      code bank slice k (used to remove the +128 data bias of the
+//      uint8 x int8 inner products - see dot_IQ_code_acc()).
 //
 void sdr_corr_std(const sdr_buff_t *buff, int ix, int N, double fs,
     double fc, double phi, const int8_t *code, const int32_t *code_sum,
@@ -1167,6 +1132,7 @@ void sdr_corr_std(const sdr_buff_t *buff, int ix, int N, double fs,
     int32_t s1I[SDR_MAX_CORR] = {0}, s1Q[SDR_MAX_CORR] = {0};
     int32_t s2I[SDR_MAX_CORR] = {0}, s2Q[SDR_MAX_CORR] = {0};
     const int8_t *slice[SDR_MAX_CORR];
+    const int32_t *csums[SDR_MAX_CORR];
     int js[SDR_MAX_CORR];
     float dot_EPL = 0.0, sign, cscale = SDR_CSCALE / scale;
     double lscale = (double)(1 << 24) * NTBL;
@@ -1179,110 +1145,47 @@ void sdr_corr_std(const sdr_buff_t *buff, int ix, int N, double fs,
         if (j < 0) j += N; else if (j >= N) j -= N;
         js[i] = j;
         slice[i] = code + k * N;
+        csums[i] = code_sum + k * (N + 1);
     }
-#if defined(AVX2)
-    const sdr_cpx16_t *tbl = mix_tbl_b; // +128-biased for dot_IQ_code_acc()
-#else
-    const sdr_cpx16_t *tbl = mix_tbl;
-#endif
     for (int c0 = 0; c0 < N; c0 += MIX_CORR_CHUNK) {
         int len = MIN(MIX_CORR_CHUNK, N - c0);
         int ix2 = (ix + c0) % buff->N;
         uint32_t p = p0 + sp * (uint32_t)c0;
 
-        // mix carrier of the chunk
+        // mix carrier of the chunk (+128-biased for dot_IQ_code_acc())
         if (ix2 + len <= buff->N) {
-            mix_carr_p(buff, ix2, len, p, sp, tbl, IQ);
+            mix_carr_p(buff, ix2, len, p, sp, mix_tbl_b, IQ);
         } else { // across IF buffer boundary
             int m = buff->N - ix2;
-            mix_carr_p(buff, ix2, m, p, sp, tbl, IQ);
-            mix_carr_p(buff, 0, len - m, p + sp * (uint32_t)m, sp, tbl,
+            mix_carr_p(buff, ix2, m, p, sp, mix_tbl_b, IQ);
+            mix_carr_p(buff, 0, len - m, p + sp * (uint32_t)m, sp, mix_tbl_b,
                 IQ + m);
         }
         // accumulate correlations before and after the code wrap-around
         for (int i = 0; i < n; i++) {
             int j = js[i], a1 = MIN(c0 + len, j), b0 = MAX(c0, j);
             if (a1 > c0) {
-                dot_IQ_code_acc(IQ, slice[i] + N - j + c0, a1 - c0,
-                    s1I + i, s1Q + i);
+                dot_IQ_code_acc(IQ, slice[i] + N - j + c0,
+                    csums[i] + N - j + c0, a1 - c0, s1I + i, s1Q + i);
             }
             if (b0 < c0 + len) {
                 dot_IQ_code_acc(IQ + b0 - c0, slice[i] + b0 - j,
-                    c0 + len - b0, s2I + i, s2Q + i);
+                    csums[i] + b0 - j, c0 + len - b0, s2I + i, s2Q + i);
             }
         }
     }
-#if defined(AVX2)
-    // remove data bias: sum((d+128)*c) = sum(d*c) + 128*sum(c)
-    for (int i = 0; i < n; i++) {
-        const int32_t *cs = code_sum + (int)(slice[i] - code) / N * (N + 1);
-        int32_t b1 = 128 * (cs[N] - cs[N-js[i]]);
-        int32_t b2 = 128 * cs[N-js[i]];
-        s1I[i] -= b1; s1Q[i] -= b1;
-        s2I[i] -= b2; s2Q[i] -= b2;
-    }
-#endif
     for (int i = 0; i < n; i++) {
         corr1[i][0] = s1I[i] * cscale;
         corr1[i][1] = s1Q[i] * cscale;
         corr2[i][0] = s2I[i] * cscale;
         corr2[i][1] = s2Q[i] * cscale;
     }
-    // detect polarity flip over code wrap-around
+    // detect polarity flip over code wrap-around (unless fixed by pol)
     for (int i = 0; i < 3; i++) {
         dot_EPL += corr1[i][0] * corr2[i][0] + corr1[i][1] * corr2[i][1];
     }
-    sign = (!pol && dot_EPL < 0.0f) ? -1.0f : 1.0f;
-    
-    for (int i = 0; i < n; i++) {
-        corr[i][0] = (corr1[i][0] + sign * corr2[i][0]) / N;
-        corr[i][1] = (corr1[i][1] + sign * corr2[i][1]) / N;
-    }
-    for (int i = 0; i < 2; i++) {
-        C[0][i] = corr1[0][i];
-        C[1][i] = corr2[0][i];
-    }
-}
+    sign = pol ? (pol > 0 ? 1.0f : -1.0f) : (dot_EPL < 0.0f ? -1.0f : 1.0f);
 
-//------------------------------------------------------------------------------
-//  Standard correlator with complex spreading codes.
-//
-//  args:
-//      IQ       (I) IF-carrier-mixed IF data as sdr_cpx_16_t array (N x 1)
-//      code     (I) resampled complex code bank (N x SDR_N_CODES)
-//      N        (I) size of IQ and code
-//      coff     (I) code offset (samples)
-//      pos      (I) correlator shift positions (n x 1) (samples)
-//      n        (I) size of pos (number of correlators)
-//      corr     (O) correlations as sdr_cpx_t array (n x 1)
-//      C        (O) correlations before and after bit transition
-//
-//  return:
-//      none
-//
-//  notes:
-//      The value of spreading codes shall be -1, 0 or 1.
-//
-void sdr_corr_std_cpx_code(const sdr_cpx16_t *IQ, const sdr_cpx16_t *code,
-    int N, double coff, const double *pos, int n, sdr_cpx_t *corr,
-    sdr_cpx_t *C)
-{
-    sdr_cpx_t corr1[SDR_MAX_CORR], corr2[SDR_MAX_CORR];
-    float dot_EPL = 0.0, sign;
-
-    for (int i = 0; i < n; i++) {
-        double p = coff + pos[i];
-        int j = (int)floor(p), k = (int)((p - j) * SDR_N_CODES);
-        if (j < 0) j += N; else if (j >= N) j -= N;
-        dot_IQ_cpx_code(IQ, code + k * N + N - j, j, 1.0, corr1 + i);
-        dot_IQ_cpx_code(IQ + j, code + k * N, N - j, 1.0, corr2 + i);
-    }
-    // detect polarity flip
-    for (int i = 0; i < 3; i++) {
-        dot_EPL += corr1[i][0] * corr2[i][0] + corr1[i][1] * corr2[i][1];
-    }
-    sign = dot_EPL < 0.0f ? -1.0f : 1.0f;
-    
     for (int i = 0; i < n; i++) {
         corr[i][0] = (corr1[i][0] + sign * corr2[i][0]) / N;
         corr[i][1] = (corr1[i][1] + sign * corr2[i][1]) / N;
