@@ -1,8 +1,8 @@
 
-# **Pocket SDR - An Open-Source GNSS SDR,<br> ver. 0.18**
+# **Pocket SDR - An Open-Source GNSS SDR,<br> ver. 0.19**
 
 <div style="text-align: right;">
-<strong>2026-07-06</strong>
+<strong>2026-07-24</strong>
 </div>
 
 ---
@@ -629,5 +629,16 @@ purposes, is prohibited.
   doc/update_csk_decoder.md). Fused carrier wipeoff into the standard and FFT
   correlators and unified the int8 code banks. Optimized NEON paths for
   Raspberry Pi 5 (SDOT). Added option `-w` for FFTW wisdom import.
+- **2026-07-24 (v0.19)**: Added int8 code support to the correlators for
+  multi-level sub-carrier replicas: CBOC for Galileo E1B / E1C and AltBOC for
+  E5. Improved E5 AltBOC tracking with pre-combined complex replicas on a
+  restored complex correlator path. Added extended coherent tracking for
+  pilot signals and low-C/N0 acquisition / tracking options (`t_acq_ext`,
+  `t_coh`, `thres_cn0_ext`). Removed the C/N0 estimation bias at low C/N0.
+  Widened the pseudorange lower bound for GEO / IGSO epoch seeding.
+  Generalized the output streams: up to 8 streams with selectable types
+  (NMEA, RTCM3, receiver log, IF data log), e.g. NMEA to a file and a TCP
+  server simultaneously (`-nmea` / `-rtcm` / `-log` / `-raw` repeatable in
+  pocket_trk; new Output Options UI in pocket_sdr.py).
 
 --------------------------------------------------------------------------------
