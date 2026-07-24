@@ -24,6 +24,8 @@
 //  2025-02-18  1.9  fix bug on output files
 //                   add -rfch option
 //  2025-03-16  1.10 add -opt option, delete -w option
+//  2026-07-24  1.11 support up to 8 output streams by repeating -nmea, -rtcm,
+//                   -log and -raw options
 //
 #include <math.h>
 #include <signal.h>
@@ -50,7 +52,8 @@ static const char *usage_text[] = {
     "       [-fo freq[,...]] [-IQ {1|2}[,...]] [-bits {2|3}[,...]",
     "       [-toff toff] [-ti tint] [-p bus,[,port] [-c conf_file]",
     "       [-driver name] [-gain gain] [-bw bw] [-fd dopp]",
-    "       [-log path] [-nmea path] [-rtcm path] [-raw path] [-opt file] [file]",
+    "       [-log path] [-nmea path] [-rtcm path] [-raw path] ... [-opt file]",
+    "       [file]",
     NULL
 };
 
@@ -96,6 +99,19 @@ static int load_opt_file(const char *file)
     }
     fclose(fp);
     return 1;
+}
+
+// add output stream -------------------------------------------------------------
+static void add_str(int *types, const char **paths, int type, const char *path)
+{
+    for (int i = 0; i < SDR_MAX_STR; i++) {
+        if (types[i] != SDR_STR_NONE) continue;
+        types[i] = type;
+        paths[i] = path;
+        return;
+    }
+    fprintf(stderr, "too many output streams (max %d)\n", SDR_MAX_STR);
+    exit(-1);
 }
 
 // interrupt flag --------------------------------------------------------------
@@ -170,7 +186,9 @@ int main(int argc, char **argv)
     double tint = 0.1;
     const char *sig = "L1CA", *sigs[SDR_MAX_NCH];
     const char *file = "", *conf_file = "";
-    const char *paths[4] = {"", "", "", ""}, *opt_file = "";
+    int types[SDR_MAX_STR] = {0};
+    const char *paths[SDR_MAX_STR] = {"", "", "", "", "", "", "", ""};
+    const char *opt_file = "";
     const char *debug_file = "";
     const char *driver = "";
     double gain = 0.0, bw = 0.0, max_dop = 0.0;
@@ -227,13 +245,13 @@ int main(int argc, char **argv)
         } else if (!strcmp(argv[i], "-c") && i + 1 < argc) {
             conf_file = argv[++i];
         } else if (!strcmp(argv[i], "-nmea") && i + 1 < argc) {
-            paths[0] = argv[++i];
+            add_str(types, paths, SDR_STR_NMEA, argv[++i]);
         } else if (!strcmp(argv[i], "-rtcm") && i + 1 < argc) {
-            paths[1] = argv[++i];
+            add_str(types, paths, SDR_STR_RTCM3, argv[++i]);
         } else if (!strcmp(argv[i], "-log") && i + 1 < argc) {
-            paths[2] = argv[++i];
+            add_str(types, paths, SDR_STR_LOG, argv[++i]);
         } else if (!strcmp(argv[i], "-raw") && i + 1 < argc) {
-            paths[3] = argv[++i];
+            add_str(types, paths, SDR_STR_IFDATA, argv[++i]);
         } else if (!strcmp(argv[i], "-h") && i + 1 < argc) {
             max_row = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "-opt") && i + 1 < argc) {
@@ -285,13 +303,13 @@ int main(int argc, char **argv)
     }
     if (*file) {
         rcv = sdr_rcv_open_file(sigs, prns, nch, fmt, fs, fo, IQ, bits, toff,
-            tscale, file, paths, rfch_opt);
+            tscale, file, types, paths, rfch_opt);
     } else if (*driver) {
-        rcv = sdr_rcv_open_sdev(sigs, prns, nch, driver, fmt, fs, fo[0], paths,
-            rfch_opt);
+        rcv = sdr_rcv_open_sdev(sigs, prns, nch, driver, fmt, fs, fo[0], types,
+            paths, rfch_opt);
     } else {
-        rcv = sdr_rcv_open_dev(sigs, prns, nch, bus, port, conf_file, paths,
-            rfch_opt);
+        rcv = sdr_rcv_open_dev(sigs, prns, nch, bus, port, conf_file, types,
+            paths, rfch_opt);
     }
     if (!rcv) {
         return -1;
