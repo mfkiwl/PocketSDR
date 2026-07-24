@@ -305,13 +305,13 @@ pocket_trk [-sig sig -prn prn[,...] [-rfch ch[,...]] ...]
            [-toff toff] [-tscale scale] [-ti tint]
            [-p bus[,port]] [-c conf_file]
            [-driver name] [-gain gain] [-bw bw] [-fd dopp]
-           [-log path] [-nmea path] [-rtcm path] [-raw path]
+           [-log path] [-nmea path] [-rtcm path] [-raw path] ...
            [-h height] [-opt file] [-debug file] [-v] [file]
 ```
 
 ### Description
 
-Search and track GNSS signals in input digital IF data, extract observation data, decode navigation data, and generate PVT solutions. Observation and navigation data can be streamed as RTCM3, PVT solutions as NMEA, and raw IF data and event logs can be streamed independently.
+Search and track GNSS signals in input digital IF data, extract observation data, decode navigation data, and generate PVT solutions. Observation and navigation data can be streamed as RTCM3, PVT solutions as NMEA, and raw IF data and event logs can be streamed independently. The output stream options `-log`, `-nmea`, `-rtcm`, and `-raw` may each be specified multiple times, up to 8 output streams in total; each occurrence opens an additional stream of that type (e.g., `-nmea sol.nmea -nmea :2001` outputs NMEA to a file and a TCP server simultaneously).
 
 The input can be a local file, a TCP stream, a Pocket SDR FE device, or a SoapySDR-supported device (LimeSDR, HackRF, RTL-SDR, ...). If the file path is omitted and `-driver` is not specified, the input is taken from a Pocket SDR FE device directly. For file inputs, if `<file>.tag` exists the IF format, sampling rate, LO frequencies, and per-CH sampling types are auto-configured from the tag, and the corresponding `-fmt`, `-f`, `-fo`, and `-IQ` options are ignored.
 
@@ -351,16 +351,16 @@ The input can be a local file, a TCP stream, a Pocket SDR FE device, or a SoapyS
 - `-fd dopp`
   - Maximum Doppler frequency to search signals in Hz. Overrides the `max_dop` key in `-opt file` if both are given. [from `-opt file` or default `5000`]
 - `-log path`
-  - Output stream path for the tracking log (observation, navigation, PVT, events). The stream path is one of:
+  - Output stream path for the tracking log (observation, navigation, PVT, events). May be specified multiple times to open multiple log streams (max 8 output streams in total including `-nmea`, `-rtcm`, and `-raw`). The stream path is one of:
     - `(1)` local file path without `:`. Time keywords (`%Y`, `%m`, `%d`, `%h`, `%M`) are expanded as in RTKLIB streams.
     - `(2)` `:port` (TCP server)
     - `(3)` `address:port` (TCP client)
 - `-nmea path`
-  - Output stream path for PVT solutions as NMEA `GNRMC`, `GNGGA`, and `GNGSV` sentences. Same path syntax as `-log`.
+  - Output stream path for PVT solutions as NMEA `GNRMC`, `GNGGA`, and `GNGSV` sentences. Same path syntax and repeatability as `-log`.
 - `-rtcm path`
-  - Output stream path for raw observations and navigation data as RTCM3.3 messages. Same path syntax as `-log`.
+  - Output stream path for raw observations and navigation data as RTCM3.3 messages. Same path syntax and repeatability as `-log`.
 - `-raw path`
-  - Output stream path for raw IF data. Same path syntax as `-log`.
+  - Output stream path for raw IF data. Same path syntax and repeatability as `-log`. Enabled only for Pocket SDR FE or SoapySDR device inputs.
 - `-h height`
   - Console height (rows) for the runtime status display. [`64`]
 - `-opt file`

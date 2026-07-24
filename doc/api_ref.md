@@ -227,7 +227,7 @@ This API reference describes the **Pocket SDR** C library (`libsdr`). The librar
 <br><br>
 
 - `sdr_rcv_t`
-  - SDR receiver state: run flag, device type/pointer, IF data format / sampling rate / buffer length / channel counts (`nch`, `nrfch`, `narch`), current search channel, IF cycle count, per-RF-CH config (`rfch[]`), per-array-CH beam state (`arch[]`), per-CH IF buffers (RF + array), channel threads, optional `sdr_array_t`, `sdr_pvt_t`, IF data statistics, output streams `strs[4]` = {NMEA PVT, RTCM3 OBS+NAV, log, IF data log}, receiver start time (UTC), file replay scale, options string, fast-acquisition flag, IF data thread, and mutex.
+  - SDR receiver state: run flag, device type/pointer, IF data format / sampling rate / buffer length / channel counts (`nch`, `nrfch`, `narch`), current search channel, IF cycle count, per-RF-CH config (`rfch[]`), per-array-CH beam state (`arch[]`), per-CH IF buffers (RF + array), channel threads, optional `sdr_array_t`, `sdr_pvt_t`, IF data statistics, output streams `strs[SDR_MAX_STR]` with per-slot types `str_type[SDR_MAX_STR]` (`SDR_STR_???`), receiver start time (UTC), file replay scale, options string, fast-acquisition flag, IF data thread, and mutex.
 <br><br>
 
 
@@ -741,13 +741,23 @@ General DSP and bookkeeping helpers: complex/FFT primitives, IF buffer / file I/
 
 **`int sdr_log_open(const char *path)`**
 <br>
-- **Description**: Open the library log file.
+- **Description**: Open the library-owned log stream and register it as a log output.
 - **Return**: 1 on success, 0 on error
 <br><br>
 
 **`void sdr_log_close(void)`**
 <br>
-- **Description**: Close the library log file.
+- **Description**: Close the library-owned log stream opened by `sdr_log_open()`.
+<br><br>
+
+**`void sdr_log_add_str(stream_t *str)`**
+<br>
+- **Description**: Register an externally owned stream as a log output (up to `SDR_MAX_STR`; duplicates ignored). `sdr_log()` writes each record to every registered stream.
+<br><br>
+
+**`void sdr_log_rm_str(stream_t *str)`**
+<br>
+- **Description**: Unregister a stream registered by `sdr_log_add_str()`. The stream itself is not closed.
 <br><br>
 
 **`void sdr_log_level(int level)`**
@@ -767,7 +777,7 @@ General DSP and bookkeeping helpers: complex/FFT primitives, IF buffer / file I/
 
 **`int sdr_log_stat(void)`**
 <br>
-- **Description**: Get the current log status (1: open, 0: closed).
+- **Description**: Get the connection state of the first registered log stream (0 if none).
 <br><br>
 
 **`int sdr_get_log(char *buff, int size)`**
@@ -1260,7 +1270,7 @@ Antenna-array calibration and beam-forming. Calibration uses a per-epoch EKF ove
 ---
 
 ### Overview
-Top-level receiver lifecycle and state queries. A receiver wraps a front-end (USB / SoapySDR / file / stream), an IF data thread that demuxes raw samples into per-RF-CH `sdr_buff_t`s, multiple `sdr_ch_t` channel threads driving acquisition / tracking / nav decoding, an `sdr_pvt_t` for solutions, an optional `sdr_array_t`, and four output streams: NMEA PVT solutions, RTCM3 OBS+NAV (single combined stream), event/trace log, and raw IF data log.
+Top-level receiver lifecycle and state queries. A receiver wraps a front-end (USB / SoapySDR / file / stream), an IF data thread that demuxes raw samples into per-RF-CH `sdr_buff_t`s, multiple `sdr_ch_t` channel threads driving acquisition / tracking / nav decoding, an `sdr_pvt_t` for solutions, an optional `sdr_array_t`, and up to `SDR_MAX_STR` (= 8) output streams. Each stream slot is freely assigned one of the types NMEA PVT solutions, RTCM3 OBS+NAV, event log, or raw IF data log; the same type may be assigned to multiple slots (the message is encoded once and written to every stream of the type).
 <br>
 
 ### Receiver Options String
@@ -1308,15 +1318,18 @@ Top-level receiver lifecycle and state queries. A receiver wraps a front-end (US
 - **Description**: Free a receiver including all owned channels, buffers, PVT, and array state.
 <br><br>
 
-**`int sdr_rcv_start(sdr_rcv_t *rcv, int dev, void *dp, const char **paths)`**
+**`int sdr_rcv_start(sdr_rcv_t *rcv, int dev, void *dp, const int *types, const char **paths)`**
 <br>
 - **Description**: Attach a device source (`SDR_DEV_*`) and start the IF data and channel threads.
 - **Arguments**:
   - rcv: receiver
   - dev: device type
   - dp: device pointer (matching `dev`: `sdr_dev_t*`, `sdr_sdev_t*`, `FILE*`, or `stream_t*`)
-  - paths: 4-element array of output stream paths (NULL/"" disables a slot): `[0]` NMEA PVT, `[1]` RTCM3 OBS+NAV, `[2]` log, `[3]` IF data log
+  - types: `SDR_MAX_STR` (= 8)-element array of output stream types (`SDR_STR_NMEA`, `SDR_STR_RTCM3`, `SDR_STR_LOG`, `SDR_STR_IFDATA`; `SDR_STR_NONE` disables a slot)
+  - paths: `SDR_MAX_STR`-element array of output stream paths (NULL/"" disables a slot)
 - **Return**: 1 on success, 0 on error
+- **Notes**:
+  - Any type can be assigned to any slot and the same type may appear in multiple slots (e.g., NMEA to a file and a TCP server simultaneously). Messages are encoded once and written to every open stream of the type. `SDR_STR_IFDATA` slots are enabled only for `SDR_DEV_USB` / `SDR_DEV_SOAPY` inputs.
 <br><br>
 
 **`void sdr_rcv_stop(sdr_rcv_t *rcv)`**
@@ -1324,7 +1337,7 @@ Top-level receiver lifecycle and state queries. A receiver wraps a front-end (US
 - **Description**: Stop all threads (does not free `rcv`).
 <br><br>
 
-**`sdr_rcv_t *sdr_rcv_open_dev(const char **sigs, int *prns, int n, int bus, int port, const char *conf_file, const char **paths, const char *opt)`**
+**`sdr_rcv_t *sdr_rcv_open_dev(const char **sigs, int *prns, int n, int bus, int port, const char *conf_file, const int *types, const char **paths, const char *opt)`**
 <br>
 - **Description**: Open a Pocket SDR FE USB device and start a receiver.
 - **Arguments**:
@@ -1334,12 +1347,12 @@ Top-level receiver lifecycle and state queries. A receiver wraps a front-end (US
 - **Return**: receiver pointer (NULL: error)
 <br><br>
 
-**`sdr_rcv_t *sdr_rcv_open_sdev(const char **sigs, int *prns, int n, const char *driver, int fmt, double rate, double freq, const char **paths, const char *opt)`**
+**`sdr_rcv_t *sdr_rcv_open_sdev(const char **sigs, int *prns, int n, const char *driver, int fmt, double rate, double freq, const int *types, const char **paths, const char *opt)`**
 <br>
 - **Description**: Open a SoapySDR device and start a receiver.
 <br><br>
 
-**`sdr_rcv_t *sdr_rcv_open_file(const char **sigs, int *prns, int n, int fmt, double fs, const double *fo, const int *IQ, const int *bits, double toff, double tscale, const char *file, const char **paths, const char *opt)`**
+**`sdr_rcv_t *sdr_rcv_open_file(const char **sigs, int *prns, int n, int fmt, double fs, const double *fo, const int *IQ, const int *bits, double toff, double tscale, const char *file, const int *types, const char **paths, const char *opt)`**
 <br>
 - **Description**: Open an IF data file and start a receiver replaying it.
 - **Arguments**:
@@ -1374,7 +1387,13 @@ Top-level receiver lifecycle and state queries. A receiver wraps a front-end (US
 
 **`void sdr_rcv_str_stat(sdr_rcv_t *rcv, int *stat)`**
 <br>
-- **Description**: Get per-output-stream connection state into `stat[0..3]` (`[0]` NMEA, `[1]` RTCM3 OBS+NAV, `[2]` log, `[3]` IF data log).
+- **Description**: Get per-output-stream connection state into `stat[0..SDR_MAX_STR-1]` (-1: error, 0: closed, 1: waiting, 2: connected, 3: active), indexed by stream slot.
+<br><br>
+
+**`int sdr_rcv_write_str(sdr_rcv_t *rcv, int type, uint8_t *data, int size)`**
+<br>
+- **Description**: Write `data` to every open output stream whose type is `type` (`SDR_STR_*`).
+- **Return**: number of bytes written to the first stream of the type (0 if none)
 <br><br>
 
 **`int sdr_rcv_sat_stat(sdr_rcv_t *rcv, const char *sat, char *buff, int size)`**
