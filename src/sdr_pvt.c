@@ -13,6 +13,7 @@
 //  2024-12-30  1.1  add and update log contents
 //  2026-07-17  1.2  widen pseudorange lower bound for GEO/IGSO epoch seeding
 //                   add nav data consistency tests
+//  2026-07-24  1.3  output NMEA and RTCM3 to multiple streams
 //
 #include "pocket_sdr.h"
 
@@ -384,17 +385,26 @@ static void out_log_alm_sys(double time, const char *sig, const nav_t *nav,
     }
 }
 
+// test output stream of a type enabled -----------------------------------------
+static int str_ena(const sdr_rcv_t *rcv, int type)
+{
+    for (int i = 0; i < SDR_MAX_STR; i++) {
+        if (rcv->strs[i] && rcv->str_type[i] == type) return 1;
+    }
+    return 0;
+}
+
 // output NMEA RMC, GGA, GSA and GSV -------------------------------------------
-static void out_nmea(const sol_t *sol, const ssat_t *ssat, stream_t *str)
+static void out_nmea(const sol_t *sol, const ssat_t *ssat, sdr_rcv_t *rcv)
 {
     uint8_t buff[4096];
     int n = 0;
-    if (!str) return;
+    if (!str_ena(rcv, SDR_STR_NMEA)) return;
     n += outnmea_rmc(buff + n, sol);
     n += outnmea_gga(buff + n, sol);
     n += outnmea_gsa(buff + n, sol, ssat);
     n += outnmea_gsv(buff + n, sol, ssat);
-    sdr_str_write(str, buff, n);
+    sdr_rcv_write_str(rcv, SDR_STR_NMEA, buff, n);
 }
 
 // count number of signals -----------------------------------------------------
@@ -417,7 +427,7 @@ static int num_sigs(int idx, const obs_t *obs, int rcv_no)
 }
 
 // output RTCM3 MSM messages for a single RF CH (rcv_no = 0: all CHs merged) ---
-static void out_rtcm3_msm(rtcm_t *rtcm, const obs_t *obs, stream_t *str,
+static void out_rtcm3_msm(rtcm_t *rtcm, const obs_t *obs, sdr_rcv_t *rcv,
     int rcv_no)
 {
     // RTCM3 MSM message types
@@ -442,45 +452,45 @@ static void out_rtcm3_msm(rtcm_t *rtcm, const obs_t *obs, stream_t *str,
             // separate messages if nsat x nsig > 64
             if ((rtcm->obs.n + 1) * nsig[i] > 64) {
                 if (gen_rtcm3(rtcm, msgs[i], 0, 1)) {
-                    sdr_str_write(str, rtcm->buff, rtcm->nbyte);
+                    sdr_rcv_write_str(rcv, SDR_STR_RTCM3, rtcm->buff,
+                        rtcm->nbyte);
                 }
                 rtcm->obs.n = 0;
             }
             rtcm->obs.data[rtcm->obs.n++] = *data;
         }
         if (rtcm->obs.n > 0 && gen_rtcm3(rtcm, msgs[i], 0, i < idx_tail)) {
-            sdr_str_write(str, rtcm->buff, rtcm->nbyte);
+            sdr_rcv_write_str(rcv, SDR_STR_RTCM3, rtcm->buff, rtcm->nbyte);
         }
     }
 }
 
 // output RTCM3 observation data -----------------------------------------------
-static void out_rtcm3_obs(rtcm_t *rtcm, const obs_t *obs, stream_t *str,
-    const sdr_rcv_t *rcv)
+static void out_rtcm3_obs(rtcm_t *rtcm, const obs_t *obs, sdr_rcv_t *rcv)
 {
-    if (!str || obs->n <= 0) return;
+    if (!str_ena(rcv, SDR_STR_RTCM3) || obs->n <= 0) return;
     
     rtcm->time = obs->data[0].time;
     
     if (strstr(rcv->opt, "-ARRAY")) { // set staid by RF CH number
         int nch = rcv->nrfch + rcv->narch;
         for (int rcv_no = 1; rcv_no <= nch; rcv_no++) {
-            out_rtcm3_msm(rtcm, obs, str, rcv_no);
+            out_rtcm3_msm(rtcm, obs, rcv, rcv_no);
         }
     } else {
-        out_rtcm3_msm(rtcm, obs, str, 0);
+        out_rtcm3_msm(rtcm, obs, rcv, 0);
     }
 }
 
 // output RTCM3 navigation data ------------------------------------------------
 static void out_rtcm3_nav(rtcm_t *rtcm, int sat, int type, const nav_t *nav,
-    stream_t *str)
+    sdr_rcv_t *rcv)
 {
     // RTCM3 navigation message types
     static const int msgs[] = {1019, 1020, 1046, 1044, 1042, 1041, 0, 0};
     int prn, sys = satsys(sat, &prn), idx = sys_idx(sat);
     
-    if (!str || idx < 0 || !msgs[idx]) return;
+    if (!str_ena(rcv, SDR_STR_RTCM3) || idx < 0 || !msgs[idx]) return;
     if (sys == SYS_GLO) {
         rtcm->nav.geph[prn-1] = nav->geph[prn-1];
     } else {
@@ -489,7 +499,7 @@ static void out_rtcm3_nav(rtcm_t *rtcm, int sat, int type, const nav_t *nav,
     rtcm->ephsat = sat;
     int msg = (sys == SYS_GAL && type == 1) ? 1045 : msgs[idx];
     if (gen_rtcm3(rtcm, msg, 0, 0)) {
-        sdr_str_write(str, rtcm->buff, rtcm->nbyte);
+        sdr_rcv_write_str(rcv, SDR_STR_RTCM3, rtcm->buff, rtcm->nbyte);
     }
 }
 
@@ -937,7 +947,7 @@ void sdr_pvt_udnav(sdr_pvt_t *pvt, sdr_ch_t *ch)
             decode_frame(data, pvt->nav->eph + sat - 1, NULL, NULL, NULL)) {
             pvt->nav->eph[sat-1].sat = sat;
             out_log_eph(ch->time, ch->sat, ch->sig, pvt->nav->eph + sat - 1);
-            out_rtcm3_nav(pvt->rtcm, sat, 0, pvt->nav, pvt->rcv->strs[1]);
+            out_rtcm3_nav(pvt->rtcm, sat, 0, pvt->nav, pvt->rcv);
             pvt->count[2]++;
         }
         if (sys == SYS_GPS && ch->nav->type == 4) {
@@ -955,7 +965,7 @@ void sdr_pvt_udnav(sdr_pvt_t *pvt, sdr_ch_t *ch)
             pvt->nav->geph[prn-1].sat = sat;
             pvt->nav->geph[prn-1].frq = ch->prn; // FCN
             out_log_eph(ch->time, ch->sat, ch->sig, pvt->nav->geph + prn - 1);
-            out_rtcm3_nav(pvt->rtcm, sat, 0, pvt->nav, pvt->rcv->strs[1]);
+            out_rtcm3_nav(pvt->rtcm, sat, 0, pvt->nav, pvt->rcv);
             pvt->count[2]++;
         }
         if (ch->nav->type == 15 && // almanac (strings 6-15 complete)
@@ -967,7 +977,7 @@ void sdr_pvt_udnav(sdr_pvt_t *pvt, sdr_ch_t *ch)
             decode_gal_inav(data, pvt->nav->eph + sat - 1, NULL, NULL, NULL)) {
             pvt->nav->eph[sat-1].sat = sat;
             out_log_eph(ch->time, ch->sat, ch->sig, pvt->nav->eph + sat - 1);
-            out_rtcm3_nav(pvt->rtcm, sat, 0, pvt->nav, pvt->rcv->strs[1]);
+            out_rtcm3_nav(pvt->rtcm, sat, 0, pvt->nav, pvt->rcv);
             pvt->count[2]++;
         }
         if (ch->nav->type == 10 && // almanac (word types 7-10 complete)
@@ -981,7 +991,7 @@ void sdr_pvt_udnav(sdr_pvt_t *pvt, sdr_ch_t *ch)
             pvt->nav->eph[MAXSAT+sat-1].sat = sat;
             out_log_eph(ch->time, ch->sat, ch->sig, pvt->nav->eph + MAXSAT +
                 sat - 1);
-            out_rtcm3_nav(pvt->rtcm, sat, 1, pvt->nav, pvt->rcv->strs[1]);
+            out_rtcm3_nav(pvt->rtcm, sat, 1, pvt->nav, pvt->rcv);
             pvt->count[2]++;
         }
         if (ch->nav->type == 6 && // almanac (page types 5-6 complete)
@@ -996,7 +1006,7 @@ void sdr_pvt_udnav(sdr_pvt_t *pvt, sdr_ch_t *ch)
                 if (test_match_eph(pvt->nav->eph + sat - 1, &eph)) {
                     pvt->nav->eph[sat-1].sat = sat;
                     out_log_eph(ch->time, ch->sat, ch->sig, pvt->nav->eph + sat - 1);
-                    out_rtcm3_nav(pvt->rtcm, sat, 0, pvt->nav, pvt->rcv->strs[1]);
+                    out_rtcm3_nav(pvt->rtcm, sat, 0, pvt->nav, pvt->rcv);
                     pvt->count[2]++;
                 } else {
                     out_log_eph(ch->time, ch->sat, ch->sig, &eph);
@@ -1013,7 +1023,7 @@ void sdr_pvt_udnav(sdr_pvt_t *pvt, sdr_ch_t *ch)
                 if (test_match_eph(pvt->nav->eph + sat - 1, &eph)) {
                     pvt->nav->eph[sat-1].sat = sat;
                     out_log_eph(ch->time, ch->sat, ch->sig, pvt->nav->eph + sat - 1);
-                    out_rtcm3_nav(pvt->rtcm, sat, 0, pvt->nav, pvt->rcv->strs[1]);
+                    out_rtcm3_nav(pvt->rtcm, sat, 0, pvt->nav, pvt->rcv);
                     pvt->count[2]++;
                 } else {
                     out_log_eph(ch->time, ch->sat, ch->sig, &eph);
@@ -1031,7 +1041,7 @@ void sdr_pvt_udnav(sdr_pvt_t *pvt, sdr_ch_t *ch)
             decode_irn_nav(data, pvt->nav->eph + sat - 1, NULL, NULL)) {
             pvt->nav->eph[sat-1].sat = sat;
             out_log_eph(ch->time, ch->sat, ch->sig, pvt->nav->eph + sat - 1);
-            out_rtcm3_nav(pvt->rtcm, sat, 0, pvt->nav, pvt->rcv->strs[1]);
+            out_rtcm3_nav(pvt->rtcm, sat, 0, pvt->nav, pvt->rcv);
             pvt->count[2]++;
         }
     }
@@ -1108,7 +1118,7 @@ static void update_sol(sdr_pvt_t *pvt)
         
         // output log $POS and NMEA RMC, GGA, GSA and GSV
         out_log_pos(time, pvt->sol, pvt->obs->n);
-        out_nmea(pvt->sol, pvt->ssat, pvt->rcv->strs[0]);
+        out_nmea(pvt->sol, pvt->ssat, pvt->rcv);
         pvt->count[0]++;
         
         // output log $SAT
@@ -1231,7 +1241,7 @@ void sdr_pvt_udsol(sdr_pvt_t *pvt, int64_t ix)
         
         // output log $OBS and RTCM3 observation data
         out_log_obs(pvt->ix * SDR_CYC, pvt->obs, pvt->nav);
-        out_rtcm3_obs(pvt->rtcm, pvt->obs, pvt->rcv->strs[1], pvt->rcv);
+        out_rtcm3_obs(pvt->rtcm, pvt->obs, pvt->rcv);
         if (pvt->obs->n > 0) pvt->count[1]++;
         
         // update PVT solution
