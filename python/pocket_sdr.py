@@ -11,6 +11,7 @@
 #  2026-05-02  1.2  ver.0.15
 #  2026-06-01  1.3  ver.0.16
 #  2026-07-19  1.4  add low-C/N0 acquisition and tracking options
+#  2026-07-24  1.5  support up to 8 output streams with selectable types
 #
 import sys, os, platform, time, re, shutil
 from collections import deque
@@ -52,6 +53,8 @@ MAX_RCVLOG = 2000            # max receiver logs
 MAX_SOLLOG = 3600            # max solution logs
 MAX_RFCH   = 8               # max number of RF CH
 MAX_ARCH   = 8               # max number of array CH
+MAX_STR    = 8               # max number of output streams
+STR_TYPES  = {'NMEA': 1, 'RTCM3': 2, 'LOG': 3, 'IF Data': 4} # SDR_STR_???
 GAIN_OVL_M = 100             # array gain overlay grid size (M x M)
 UD_CYCLE1  = 50              # update cycle (ms) RF channels/Correlator pages
 UD_CYCLE2  = 200             # update cycle (ms) other pages
@@ -190,6 +193,16 @@ def rcv_opt_str(sys_opt, inp_opt, sig_opt, array_opt):
         opt += ' -ARCH=%d' % (narch)
     return opt
 
+# get output stream types and paths ---------------------------------------------
+def get_out_strs(out_opt):
+    types = [STR_TYPES.get(out_opt.str_type[i].get(), 0)
+        if out_opt.path_ena[i].get() else 0 for i in range(MAX_STR)]
+    paths = [out_opt.path[i].get() if out_opt.path_ena[i].get() else ''
+        for i in range(MAX_STR)]
+    c_types = (c_int32 * MAX_STR)(*types)
+    c_paths = (c_char_p * MAX_STR)(*[s.encode() for s in paths])
+    return c_types, c_paths
+
 # start receiver by Pocket SDR FE ----------------------------------------------
 def rcv_open_dev(sys_opt, inp_opt, out_opt, sig_opt, array_opt):
     sigs, prns = get_sig_opt(sig_opt)
@@ -197,18 +210,17 @@ def rcv_open_dev(sys_opt, inp_opt, out_opt, sig_opt, array_opt):
     bus  = to_int(s[0]) if len(s) >= 1 else -1
     port = to_int(s[1]) if len(s) >= 2 else -1
     conf_file = inp_opt.conf_path.get() if inp_opt.conf_ena.get() else ''
-    paths = [out_opt.path[i].get() if out_opt.path_ena[i].get() else ''
-        for i in range(4)]
     c_sigs = (c_char_p * len(sigs))(*[s.encode() for s in sigs])
     c_prns = (c_int32 * len(sigs))(*prns)
-    c_paths = (c_char_p * 4)(*[s.encode() for s in paths])
+    c_types, c_paths = get_out_strs(out_opt)
     libsdr.sdr_rcv_open_dev.argtypes = [POINTER(c_char_p), POINTER(c_int32),
-        c_int32, c_int32, c_int32, c_char_p, POINTER(c_char_p), c_char_p]
+        c_int32, c_int32, c_int32, c_char_p, POINTER(c_int32),
+        POINTER(c_char_p), c_char_p]
     libsdr.sdr_rcv_open_dev.restype = c_void_p
     info = '(bus/port=%d/%d, conf=%s)' % (bus, port, conf_file)
     opt = rcv_opt_str(sys_opt, inp_opt, sig_opt, array_opt)
     return libsdr.sdr_rcv_open_dev(c_sigs, c_prns, len(sigs), bus, port,
-        conf_file.encode(), c_paths, opt.encode()), info
+        conf_file.encode(), c_types, c_paths, opt.encode()), info
 
 # start receiver by SoapySDR device --------------------------------------------
 def rcv_open_sdev(sys_opt, inp_opt, out_opt, sig_opt, array_opt):
@@ -217,20 +229,18 @@ def rcv_open_sdev(sys_opt, inp_opt, out_opt, sig_opt, array_opt):
     driver = re.findall('\\((.*)\\)', inp_opt.type.get())[0]
     rate = to_float(inp_opt.fs.get()) * 1e6
     freq = to_float(inp_opt.fo[0].get()) * 1e6
-    paths = [out_opt.path[i].get() if out_opt.path_ena[i].get() else ''
-        for i in range(4)]
     c_sigs = (c_char_p * len(sigs))(*[s.encode() for s in sigs])
     c_prns = (c_int32 * len(sigs))(*prns)
-    c_paths = (c_char_p * 4)(*[s.encode() for s in paths])
+    c_types, c_paths = get_out_strs(out_opt)
     libsdr.sdr_rcv_open_sdev.argtypes = [POINTER(c_char_p), POINTER(c_int32),
-        c_int32, c_char_p, c_int32, c_double, c_double, POINTER(c_char_p),
-        c_char_p]
+        c_int32, c_char_p, c_int32, c_double, c_double, POINTER(c_int32),
+        POINTER(c_char_p), c_char_p]
     libsdr.sdr_rcv_open_sdev.restype = c_void_p
     info = '(driver=%s, rate=%.3fMsps, freq=%.3fMHz)' % (
         driver, rate * 1e-6, freq * 1e-6)
     opt = rcv_opt_str(sys_opt, inp_opt, sig_opt, array_opt)
     return libsdr.sdr_rcv_open_sdev(c_sigs, c_prns, len(sigs), driver.encode(),
-        fmt, rate, freq, c_paths, opt.encode()), info
+        fmt, rate, freq, c_types, c_paths, opt.encode()), info
 
 # start receiver by file -------------------------------------------------------
 def rcv_open_file(sys_opt, inp_opt, out_opt, sig_opt, array_opt):
@@ -243,24 +253,23 @@ def rcv_open_file(sys_opt, inp_opt, out_opt, sig_opt, array_opt):
     toff = to_float(inp_opt.toff.get())
     tscale = to_float(inp_opt.tscale.get())
     path = inp_opt.str_path.get()
-    paths = [out_opt.path[i].get() if out_opt.path_ena[i].get() else ''
-        for i in range(4)]
     c_sigs = (c_char_p * len(sigs))(*[s.encode() for s in sigs])
     c_prns = (c_int32 * len(sigs))(*prns)
     c_fo = (c_double * 8)(*fo)
     c_IQ = (c_int32 * 8)(*IQ)
     c_bits = (c_int32 * 8)(*bits)
-    c_paths = (c_char_p * 4)(*[s.encode() for s in paths])
+    c_types, c_paths = get_out_strs(out_opt)
     libsdr.sdr_rcv_open_file.argtypes = (POINTER(c_char_p), POINTER(c_int32),
         c_int32, c_int32, c_double, POINTER(c_double), POINTER(c_int32),
-        POINTER(c_int32), c_double, c_double, c_char_p, POINTER(c_char_p),
-        c_char_p)
+        POINTER(c_int32), c_double, c_double, c_char_p, POINTER(c_int32),
+        POINTER(c_char_p), c_char_p)
     libsdr.sdr_rcv_open_file.restype = c_void_p
     info = '(path=%s, toff=%s, tscale=%s)' % (inp_opt.str_path.get(),
         inp_opt.toff.get(), inp_opt.tscale.get())
     opt = rcv_opt_str(sys_opt, inp_opt, sig_opt, array_opt)
     return libsdr.sdr_rcv_open_file(c_sigs, c_prns, len(sigs), fmt, fs, c_fo,
-        c_IQ, c_bits, toff, tscale, path.encode(), c_paths, opt.encode()), info
+        c_IQ, c_bits, toff, tscale, path.encode(), c_types, c_paths,
+        opt.encode()), info
 
 # get signal options -----------------------------------------------------------
 def get_sig_opt(opt):
@@ -365,7 +374,7 @@ def get_rcv_stat(rcv):
 
 # get receiver stream status ---------------------------------------------------
 def get_str_stat(rcv):
-    stat = (c_int32 * 4)()
+    stat = (c_int32 * MAX_STR)()
     libsdr.sdr_rcv_str_stat.argtypes = (c_void_p, POINTER(c_int32))
     libsdr.sdr_rcv_str_stat(rcv, stat)
     return stat
@@ -742,7 +751,7 @@ def rcv_page_new(parent):
     p.txt1 = ttk.Label(p.toolbar)
     p.txt1.pack(side=LEFT, fill=X, padx=4)
     p.ind = []
-    for i in range(4):
+    for i in range(MAX_STR):
         frm = Frame(p.toolbar, bg='lightgrey')
         frm.pack(side=RIGHT, padx=(1, 1 if i > 0 else 6), pady=(2, 0))
         ind = Frame(frm, width=6, height=10)
@@ -857,7 +866,7 @@ def update_str_stat(p):
     col = ('#CC0000', BG_COLOR1, '#EE9900', '#006600', '#00CC00')
     stat = get_str_stat(rcv_body)
     for i, ind in enumerate(p):
-        ind.configure(bg=col[stat[3-i]+1])
+        ind.configure(bg=col[stat[MAX_STR-1-i]+1])
 
 # read rpy (rad) from saved calibration file, or zeros if unavailable ---------
 def read_calib_rpy_file(file=CALIB_FILE):
