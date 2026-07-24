@@ -60,6 +60,8 @@
 //  2026-07-19  1.29 add API sdr_corr_std2() with separate code banks for the
 //                   part after the code wrap-around
 //                   remove API sdr_corr_std_cpx_code()
+//  2026-07-24  1.30 support multiple log streams
+//                   add API sdr_log_add_str(), sdr_log_rm_str()
 //
 #include <math.h>
 #include <stdarg.h>
@@ -117,7 +119,8 @@ static const char *log_types[] = { // log types
     "$ALM,", "$LOG,", NULL
 };
 static int log_mask[16] = {1, 1, 1, 1, 1, 1, 1, 0, 0, 1}; // log mask
-static stream_t *log_str = NULL;  // log stream
+static stream_t *log_strs[SDR_MAX_STR] = {NULL}; // registered log streams
+static stream_t *log_str_own = NULL; // log stream owned by sdr_log_open()
 static char log_buff[MAX_LOG_BUFF]; // log buffer
 static int log_buff_p = 0;        // log buffer pointer
 static sdr_mutex_t log_buff_mtx = SDR_MUTEX_INIT;
@@ -1539,20 +1542,46 @@ int sdr_str_write(stream_t *str, uint8_t *data, int size)
 // open log --------------------------------------------------------------------
 int sdr_log_open(const char *path)
 {
-    if (!path || !*path || log_str) return 0;
+    if (!path || !*path || log_str_own) return 0;
     
-    if (!(log_str = sdr_str_open(path))) {
+    if (!(log_str_own = sdr_str_open(path))) {
         fprintf(stderr, "log stream open error %s\n", path);
         return 0;
     }
+    sdr_log_add_str(log_str_own);
     return 1;
 }
 
 // close log -------------------------------------------------------------------
 void sdr_log_close(void)
 {
-    sdr_str_close(log_str);
-    log_str = NULL;
+    sdr_log_rm_str(log_str_own);
+    sdr_str_close(log_str_own);
+    log_str_own = NULL;
+}
+
+// register log stream (non-owned) ---------------------------------------------
+void sdr_log_add_str(stream_t *str)
+{
+    if (!str) return;
+    for (int i = 0; i < SDR_MAX_STR; i++) {
+        if (log_strs[i] == str) return;
+    }
+    for (int i = 0; i < SDR_MAX_STR; i++) {
+        if (!log_strs[i]) {
+            log_strs[i] = str;
+            return;
+        }
+    }
+}
+
+// unregister log stream --------------------------------------------------------
+void sdr_log_rm_str(stream_t *str)
+{
+    if (!str) return;
+    for (int i = 0; i < SDR_MAX_STR; i++) {
+        if (log_strs[i] == str) log_strs[i] = NULL;
+    }
 }
 
 // set log level ---------------------------------------------------------------
@@ -1594,9 +1623,10 @@ void sdr_log(int level, const char *msg, ...)
             return;
         }
         len = MIN(len, (int)sizeof(buff) - 3);
-        if (log_str) {
-            strwrite(log_str, (uint8_t *)buff, len);
-            strwrite(log_str, (uint8_t *)"\r\n", 2);
+        for (i = 0; i < SDR_MAX_STR; i++) {
+            if (!log_strs[i]) continue;
+            strwrite(log_strs[i], (uint8_t *)buff, len);
+            strwrite(log_strs[i], (uint8_t *)"\r\n", 2);
         }
         sdr_mutex_lock(&log_buff_mtx);
         if (log_buff_p + len + 2 < MAX_LOG_BUFF) {
@@ -1622,7 +1652,10 @@ int sdr_get_log(char *buff, int size)
 int sdr_log_stat(void)
 {
     char msg[1024];
-    return log_str ? strstat(log_str, msg) : 0;
+    for (int i = 0; i < SDR_MAX_STR; i++) {
+        if (log_strs[i]) return strstat(log_strs[i], msg);
+    }
+    return 0;
 }
 
 // parse numbers list and range ------------------------------------------------
