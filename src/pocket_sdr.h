@@ -23,6 +23,7 @@
 //  2026-06-17  1.15 ver.0.17
 //  2026-07-05  1.16 ver.0.18
 //  2026-07-19  1.17 support extended coherent tracking for pilot signals
+//  2026-07-24  1.18 support up to 8 output streams with selectable types
 //
 #ifndef POCKET_SDR_H
 #define POCKET_SDR_H
@@ -95,6 +96,13 @@ extern "C" {
 #define SDR_FMT_RAW32  6        // SDR IF data format: packed 32 bits raw (8CH)
 #define SDR_FMT_CS8    7        // SDR IF data format: int8 x 2 complex (IQ)
 #define SDR_FMT_CS16   8        // SDR IF data format: int16 x 2 complex (IQ)
+
+#define SDR_MAX_STR    8        // max number of output streams
+#define SDR_STR_NONE   0        // output stream type: none
+#define SDR_STR_NMEA   1        // output stream type: NMEA 0183
+#define SDR_STR_RTCM3  2        // output stream type: RTCM3
+#define SDR_STR_LOG    3        // output stream type: receiver log
+#define SDR_STR_IFDATA 4        // output stream type: IF data log
 
 #define SDR_STATE_IDLE 1        // SDR channel state: idle
 #define SDR_STATE_SRCH 2        // SDR channel state: search
@@ -344,7 +352,8 @@ typedef struct sdr_rcv_tag {    // SDR receiver type
     sdr_array_t *array;         // antenna array state (NULL if narch == 0)
     sdr_pvt_t *pvt;             // SDR PVT
     sdr_stats_t stats;          // IF data statistics
-    stream_t *strs[4];          // NMEA, RTCM3, log and IF data log streams
+    int str_type[SDR_MAX_STR];  // output stream types (SDR_STR_???)
+    stream_t *strs[SDR_MAX_STR]; // output streams
     gtime_t start_time;         // receiver start time (UTC)
     double tscale;              // time scale to replay IF data file
     char opt[1024];             // receiver options
@@ -456,6 +465,8 @@ void sdr_str_close(stream_t *str);
 int sdr_str_write(stream_t *str, uint8_t *data, int size);
 int sdr_log_open(const char *path);
 void sdr_log_close(void);
+void sdr_log_add_str(stream_t *str);
+void sdr_log_rm_str(stream_t *str);
 void sdr_log_level(int level);
 void sdr_log_mask(const int *mask, int n);
 void sdr_log(int level, const char *msg, ...);
@@ -564,20 +575,24 @@ sdr_rcv_t *sdr_rcv_new(const char **sigs, const int *prns, int n, int fmt,
     double fs, const double *fo, const int *IQ, const int *bits,
     const char *opt);
 void sdr_rcv_free(sdr_rcv_t *rcv);
-int sdr_rcv_start(sdr_rcv_t *rcv, int dev, void *dp, const char **paths);
+int sdr_rcv_start(sdr_rcv_t *rcv, int dev, void *dp, const int *types,
+    const char **paths);
 void sdr_rcv_stop(sdr_rcv_t *rcv);
 sdr_rcv_t *sdr_rcv_open_dev(const char **sigs, int *prns, int n, int bus,
-    int port, const char *conf_file, const char **paths, const char *opt);
-sdr_rcv_t *sdr_rcv_open_sdev(const char **sigs, int *prns, int n,
-    const char *driver, int fmt, double rate, double freq, const char **paths,
+    int port, const char *conf_file, const int *types, const char **paths,
     const char *opt);
+sdr_rcv_t *sdr_rcv_open_sdev(const char **sigs, int *prns, int n,
+    const char *driver, int fmt, double rate, double freq, const int *types,
+    const char **paths, const char *opt);
 sdr_rcv_t *sdr_rcv_open_file(const char **sigs, int *prns, int n, int fmt,
     double fs, const double *fo, const int *IQ, const int *bits, double toff,
-    double tscale, const char *file, const char **paths, const char *opt);
+    double tscale, const char *file, const int *types, const char **paths,
+    const char *opt);
 void sdr_rcv_close(sdr_rcv_t *rcv);
 void sdr_rcv_setopt(const char *opt, double value);
 int sdr_rcv_rcv_stat(sdr_rcv_t *rcv, char *buff, int size);
 void sdr_rcv_str_stat(sdr_rcv_t *rcv, int *stat);
+int sdr_rcv_write_str(sdr_rcv_t *rcv, int type, uint8_t *data, int size);
 int sdr_rcv_sat_stat(sdr_rcv_t *rcv, const char *sat, char *buff, int size);
 int sdr_rcv_ch_stat(sdr_rcv_t *rcv, const char *sys, int all,
     double min_lock, int rfch, int opt, char *buff, int size);
