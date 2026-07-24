@@ -8,6 +8,7 @@
 #  2024-06-10  1.0  new
 #  2024-12-30  1.1  update input options, output options, system options
 #  2026-07-19  1.2  add low-C/N0 acquisition and tracking options
+#  2026-07-24  1.3  support up to 8 output streams with selectable types
 #
 import os, webbrowser, subprocess
 from tkinter import *
@@ -18,6 +19,13 @@ import sdr_rtk
 
 # constants --------------------------------------------------------------------
 MAX_RFCH = 8           # max number of RF channels
+MAX_STR  = 8           # max number of output streams
+STR_TYPES = ('NMEA', 'RTCM3', 'LOG', 'IF Data') # output stream types
+STR_FILE_TYPES = {     # file dialog types by output stream type
+    'NMEA'   : [('NMEA File', '*.nmea'), ('All', '*.*')],
+    'RTCM3'  : [('RTCM3 File', '*.rtcm3'), ('All', '*.*')],
+    'LOG'    : [('Log File', '*.log'), ('All', '*.*')],
+    'IF Data': [('Raw IF Log', '*.bin'), ('All', '*.*')]}
 BG_COLOR = '#F8F8F8'   # background color
 DLG_MARGIN = (20, 15)  # dialog margin
 BAND_LINK = 'file://' + os.path.dirname(__file__) + '/../doc/signal_bands.pdf'
@@ -81,7 +89,8 @@ def custom_btn_new(parent, label='', font=FONT):
     p.panel = Frame(parent, bg='#AAAAAA')
     p.btn = ttk.Label(p.panel, text=label, anchor=CENTER, background='white')
     p.btn.pack(expand=1, fill=BOTH, padx=1, pady=1)
-    p.btn.bind('<Enter>', lambda e: e.widget.configure(background = '#DDDDDD'))
+    p.btn.bind('<Enter>', lambda e: not e.widget.instate(('disabled',)) and
+        e.widget.configure(background = '#DDDDDD'))
     p.btn.bind('<Leave>', lambda e: e.widget.configure(background = 'white'))
     return p
 
@@ -224,18 +233,24 @@ def inp_opt_new(opt_p=None):
 def out_opt_new(opt_p=None):
     opt = Obj()
     opt.log = ('TIME', 'POS', 'ATT', 'OBS', 'NAV', 'SAT', 'CH', 'EPH', 'ALM', 'LOG')
-    opt.path_ena = [IntVar() for i in range(4)]
-    opt.path = [StringVar() for i in range(4)]
+    opt.path_ena = [IntVar() for i in range(MAX_STR)]
+    opt.str_type = [StringVar() for i in range(MAX_STR)]
+    opt.path = [StringVar() for i in range(MAX_STR)]
     opt.log_sel = [IntVar() for s in opt.log]
     opt.array_sep = IntVar()
     if opt_p != None:
-        for i in range(4):
+        for i in range(MAX_STR):
             opt.path_ena[i].set(opt_p.path_ena[i].get())
+            opt.str_type[i].set(opt_p.str_type[i].get())
             opt.path[i].set(opt_p.path[i].get())
         for i in range(len(opt.log_sel)):
             opt.log_sel[i].set(opt_p.log_sel[i].get())
         opt.array_sep.set(opt_p.array_sep.get())
     else:
+        for i in range(MAX_STR):
+            # defaults keep the former fixed assignment for streams 1-4
+            opt.str_type[i].set(STR_TYPES[i] if i < len(STR_TYPES) else
+                STR_TYPES[0])
         for i in range(len(opt.log_sel)):
             opt.log_sel[i].set(0 if i in (2, 6, 7, 8) else 1)
     return opt
@@ -590,34 +605,68 @@ def on_to_rinex(e, path, status):
     if file != '':
         rtcm3_to_rinex(status, file)
 
+# generate output stream panel ---------------------------------------------------
+def str_panel_new(parent, opt, i):
+    panel = Frame(parent, bg=BG_COLOR)
+    ttk.Checkbutton(panel, text='%d' % (i + 1), variable=opt.path_ena[i],
+        command=lambda: on_str_ena_change(panel, opt, i)).pack(side=LEFT)
+    panel.box = ttk.Combobox(panel, width=7, values=STR_TYPES,
+        textvariable=opt.str_type[i], justify=CENTER, font=FONT)
+    panel.box.pack(side=LEFT, padx=(2, 4))
+    p = custom_btn_new(panel, ' ... ')
+    p.panel.pack(side=RIGHT, padx=2, pady=1)
+    panel.btn = p.btn
+    panel.inp = ttk.Entry(panel, textvariable=opt.path[i], font=FONT)
+    panel.inp.pack(side=LEFT, expand=1, fill=X)
+    p.btn.bind('<Button-1>', lambda e: on_str_path_btn_push(e, panel, opt, i))
+    panel.pack(fill=X, padx=(10, 2), pady=1)
+    on_str_ena_change(panel, opt, i)
+    return panel
+
+# output stream enable change callback --------------------------------------------
+def on_str_ena_change(p, opt, i):
+    ena = opt.path_ena[i].get()
+    p.box.configure(state='readonly' if ena else DISABLED)
+    p.inp.configure(state=NORMAL if ena else DISABLED)
+    p.btn.configure(state=NORMAL if ena else DISABLED)
+
+# output stream path button push callback ----------------------------------------
+def on_str_path_btn_push(e, p, opt, i):
+    if not opt.path_ena[i].get(): return
+    types = STR_FILE_TYPES.get(opt.str_type[i].get(), [('All', '*.*')])
+    path = filedialog.asksaveasfilename(parent=p, title='Output File Path',
+        filetypes=types)
+    if path != '':
+        opt.path[i].set(path)
+
+# get first enabled RTCM3 output stream path -------------------------------------
+def rtcm3_path(opt):
+    for i in range(MAX_STR):
+        if opt.path_ena[i].get() and opt.str_type[i].get() == 'RTCM3':
+            return opt.path[i].get()
+    return ''
+
 # show Output Options dialog ---------------------------------------------------
 def out_opt_dlg(root, opt):
-    texts = ('Output Paths (File: local_path[::S=tint], TCP: [addr]:port)',
-        'PVT Solutions (NMEA 0183)', 'OBS and NAV Data (RTCM3)',
-        'Receiver Log (CSV Text)', 'IF Data Log (RAW8, RAW16 or RAW32)',
+    texts = ('Output Streams (File: local_path[::S=tint], TCP: [addr]:port)',
         'Output Receiver Log Types', 'Keywords Replacement in Path',
-        '%Y=Year(yyyy) %y=year(yy) %m=month(mm) %d=day(dd)',
-        '%h=hour(00-23) %M=minute(00-59) %S=second(00-59)')
+        '%Y=Year(yyyy) %y=year(yy) %m=month(mm) %d=day(dd) %h=hour(00-23)',
+        '%M=minute(00-59) %S=second(00-59)')
     opt_new = out_opt_new(opt)
-    dlg = modal_dlg_new(root, 500, 520, 'Output Options')
+    dlg = modal_dlg_new(root, 600, 500, 'Output Options')
     panel1 = Frame(dlg.panel, bg=BG_COLOR, relief=GROOVE, borderwidth=2)
     panel1.pack(fill=X, pady=2)
     ttk.Label(panel1, text=texts[0], justify=LEFT).pack(fill=X, padx=10,
-        pady=(4, 8))
-    path_panel_new(panel1, texts[1], out=1, var_path=opt_new.path[0],
-        var_ena=opt_new.path_ena[0], types=[('NMEA File', '*.nmea'), ('All', '*.*')])
-    path_panel_new(panel1, texts[2], out=1, var_path=opt_new.path[1],
-       var_ena=opt_new.path_ena[1], types=[('RTCM3 File', '*.rtcm3'), ('All', '*.*')],
-       var_extra=opt_new.array_sep, text_extra='RF CH Separation')
-    path_panel_new(panel1, texts[3], out=1, var_path=opt_new.path[2],
-       var_ena=opt_new.path_ena[2], types=[('Log File', '*.log'), ('All', '*.*')])
-    path_panel_new(panel1, texts[4], out=1, var_path=opt_new.path[3],
-       var_ena=opt_new.path_ena[3], types=[('Raw IF Log', '*.bin'), ('All', '*.*')])
+        pady=(4, 2))
+    for i in range(MAX_STR):
+        str_panel_new(panel1, opt_new, i)
+    ttk.Checkbutton(panel1, text='RF CH Separation (RTCM3)',
+        variable=opt_new.array_sep).pack(anchor=W, padx=10, pady=(2, 4))
     panel2 = Frame(dlg.panel, bg=BG_COLOR, relief=GROOVE, borderwidth=2)
     panel2.pack(fill=X, pady=2)
-    ttk.Label(panel2, text=texts[5], justify=LEFT).pack(fill=X, padx=10, pady=2)
+    ttk.Label(panel2, text=texts[1], justify=LEFT).pack(fill=X, padx=10, pady=2)
     n = len(opt_new.log_sel)
-    cols = 8
+    cols = 10
     panel3 = Frame(panel2, bg=BG_COLOR)
     panel3.pack(anchor=W, padx=6, pady=4)
     for i, (label, var) in enumerate(zip(opt_new.log, opt_new.log_sel)):
@@ -625,14 +674,14 @@ def out_opt_dlg(root, opt):
             ).grid(row=i // cols, column=i % cols, sticky=W, padx=4)
     panel4 = Frame(dlg.panel, bg=BG_COLOR, relief=GROOVE, borderwidth=2)
     panel4.pack(fill=X, pady=2)
-    ttk.Label(panel4, text=texts[6], justify=LEFT).pack(fill=X, padx=10, pady=2)
-    ttk.Label(panel4, text=texts[7], justify=LEFT).pack(fill=X, padx=26, pady=2)
-    ttk.Label(panel4, text=texts[8], justify=LEFT).pack(fill=X, padx=26, pady=(2, 8))
+    ttk.Label(panel4, text=texts[2], justify=LEFT).pack(fill=X, padx=10, pady=2)
+    ttk.Label(panel4, text=texts[3], justify=LEFT).pack(fill=X, padx=26, pady=2)
+    ttk.Label(panel4, text=texts[4], justify=LEFT).pack(fill=X, padx=26, pady=(2, 8))
     status = ttk.Label(dlg.panel, text='', foreground='blue', anchor=N)
     status.pack(fill=X, expand=1, pady=(4,12))
     btn_rnx = ttk.Button(dlg.btns, width=12, padding=(2, 2), text='To RINEX')
     btn_rnx.pack(side=LEFT, padx=1)
-    btn_rnx.bind('<Button-1>', lambda e: on_to_rinex(e, opt_new.path[1].get(), status))
+    btn_rnx.bind('<Button-1>', lambda e: on_to_rinex(e, rtcm3_path(opt_new), status))
     root.wait_window(dlg.win)
     return opt_new if dlg.ok else opt
 
