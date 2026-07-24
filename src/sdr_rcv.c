@@ -19,6 +19,11 @@
 //  2025-01-17  1.9  delete RINEX output by -OUTRNX option
 //  2025-11-16  1.10 support alternative RF frontends
 //  2026-07-19  1.11 add low-C/N0 acquisition and tracking options
+//  2026-07-24  1.12 support up to 8 output streams with selectable types
+//                   modify API sdr_rcv_start(), sdr_rcv_open_dev(),
+//                   sdr_rcv_open_sdev(), sdr_rcv_open_file(),
+//                   sdr_rcv_str_stat()
+//                   add API sdr_rcv_write_str()
 //
 #include "pocket_sdr.h"
 
@@ -246,12 +251,34 @@ int sdr_rcv_ch_stat(sdr_rcv_t *rcv, const char *sys, int chno, double min_lock,
 void sdr_rcv_str_stat(sdr_rcv_t *rcv, int *stat)
 {
     char msg[1024];
-    for (int i = 0; i < 4; i++) {
-        // stat[0]: NMEA, [1]: RTCM, [2]: log, [3]: IF data
+    for (int i = 0; i < SDR_MAX_STR; i++) {
         // -1: error, 0: close, 1: wait, 2: connect, 3: active
         stat[i] = rcv && rcv->strs[i] ? strstat(rcv->strs[i], msg) : 0;
     }
-    stat[2] = sdr_log_stat();
+}
+
+//------------------------------------------------------------------------------
+//  Write data to all output streams of a specified type.
+//
+//  args:
+//      rcv       (I)  SDR receiver
+//      type      (I)  output stream type (SDR_STR_???)
+//      data      (I)  data to be written
+//      size      (I)  data size (bytes)
+//
+//  returns:
+//      data size written to the first stream of the type (bytes)
+//
+int sdr_rcv_write_str(sdr_rcv_t *rcv, int type, uint8_t *data, int size)
+{
+    int bytes = -1;
+    
+    for (int i = 0; i < SDR_MAX_STR; i++) {
+        if (!rcv->strs[i] || rcv->str_type[i] != type) continue;
+        int n = sdr_str_write(rcv->strs[i], data, size);
+        if (bytes < 0) bytes = n;
+    }
+    return bytes < 0 ? 0 : bytes;
 }
 
 // get receiver status as string -----------------------------------------------
@@ -1295,8 +1322,9 @@ static void *rcv_thread(void *arg)
         // write IF data buffer
         write_buff(rcv, raw, ix);
         
-        // write IF data log stream
-        rcv->stats.sum += sdr_str_write(rcv->strs[3], raw, size) * 1e-6;
+        // write IF data log streams
+        rcv->stats.sum += sdr_rcv_write_str(rcv, SDR_STR_IFDATA, raw, size) *
+            1e-6;
         
         // update signal search channel
         update_srch_ch(rcv);
@@ -1332,16 +1360,19 @@ static void write_raw_tag_file(sdr_rcv_t *rcv);
 //      rcv       (I)  SDR receiver
 //      dev       (I)  SDR device type (SDR_DEV_???)
 //      dp        (I)  SDR device pointer
-//      paths     (I)  output stream paths ("": no output)
-//                       paths[0]: NMEA PVT solutions stream
-//                       paths[1]: RTCM3 OBS and NAV data stream
-//                       paths[2]: log stream
-//                       paths[3]: IF data log stream
+//      types     (I)  output stream types (SDR_STR_???, SDR_STR_NONE: no
+//                     output) (types[SDR_MAX_STR])
+//      paths     (I)  output stream paths ("": no output) (paths[SDR_MAX_STR])
 //
 //  returns:
 //      Status (1:OK, 0:error)
 //
-int sdr_rcv_start(sdr_rcv_t *rcv, int dev, void *dp, const char **paths)
+//  notes:
+//      Multiple streams of the same type are allowed. IF data log streams are
+//      enabled only for SDR device or SoapySDR device inputs.
+//
+int sdr_rcv_start(sdr_rcv_t *rcv, int dev, void *dp, const int *types,
+    const char **paths)
 {
     char *p;
     double scale = 1.0;
@@ -1363,7 +1394,20 @@ int sdr_rcv_start(sdr_rcv_t *rcv, int dev, void *dp, const char **paths)
         sscanf(p, "-LOG_LEVEL=%d", &log_level);
     }
     sdr_log_level(log_level);
-    sdr_log_open(paths[2]);
+    // open output streams
+    for (int i = 0; types && paths && i < SDR_MAX_STR; i++) {
+        if (types[i] == SDR_STR_NONE || !paths[i] || !*paths[i]) continue;
+        if (types[i] == SDR_STR_IFDATA && dev != SDR_DEV_USB &&
+            dev != SDR_DEV_SOAPY) {
+            continue;
+        }
+        if (!(rcv->strs[i] = sdr_str_open(paths[i]))) {
+            fprintf(stderr, "stream open error: %s\n", paths[i]);
+            continue;
+        }
+        rcv->str_type[i] = types[i];
+        if (types[i] == SDR_STR_LOG) sdr_log_add_str(rcv->strs[i]);
+    }
     char tstr[32];
     time2str(start_time, tstr, 1);
     sdr_log(3, "$LOG,%.3f,%s,%d,START %s VER=%s DEV=%d FMT=%d FS=%.3f NCH=%d",
@@ -1393,14 +1437,6 @@ int sdr_rcv_start(sdr_rcv_t *rcv, int dev, void *dp, const char **paths)
     rcv->dp = dp;
     rcv->pvt = sdr_pvt_new(rcv);
     rcv->start_time = start_time;
-    for (int i = 0; i < 4; i++) {
-        if (i == 3 && (rcv->dev != SDR_DEV_USB && rcv->dev != SDR_DEV_SOAPY)) {
-            continue;
-        }
-        if (i != 2 && *paths[i] && !(rcv->strs[i] = sdr_str_open(paths[i]))) {
-            fprintf(stderr, "stream open error: %s", paths[i]);
-        }
-    }
     write_raw_tag_file(rcv);
     rcv->state = 1;
     if (!sdr_thread_create(&rcv->thread, rcv_thread, rcv)) {
@@ -1425,25 +1461,29 @@ static int get_file_path(stream_t *str, char *file, int size)
     return snprintf(file, size, "%s", p + 10) > 0;
 }
 
-// write tag file for raw IF data ---------------------------------------------
+// write tag files for raw IF data ----------------------------------------------
 static void write_raw_tag_file(sdr_rcv_t *rcv)
 {
     double fo[SDR_MAX_RFCH];
     int IQ[SDR_MAX_RFCH], bits[SDR_MAX_RFCH];
     char file[1024];
     
-    if ((rcv->dev != SDR_DEV_USB && rcv->dev != SDR_DEV_SOAPY) ||
-        !rcv->strs[3] || rcv->strs[3]->type != STR_FILE ||
-        !get_file_path(rcv->strs[3], file, sizeof(file))) {
-        return;
-    }
+    if (rcv->dev != SDR_DEV_USB && rcv->dev != SDR_DEV_SOAPY) return;
+    
     for (int i = 0; i < SDR_MAX_RFCH; i++) {
         fo[i] = rcv->rfch[i].fo;
         IQ[i] = rcv->rfch[i].IQ;
         bits[i] = rcv->rfch[i].bits;
     }
-    sdr_tag_write(file, SDR_DEV_NAME, rcv->start_time, rcv->fmt, rcv->fs, fo,
-        IQ, bits);
+    for (int i = 0; i < SDR_MAX_STR; i++) {
+        if (!rcv->strs[i] || rcv->str_type[i] != SDR_STR_IFDATA ||
+            rcv->strs[i]->type != STR_FILE ||
+            !get_file_path(rcv->strs[i], file, sizeof(file))) {
+            continue;
+        }
+        sdr_tag_write(file, SDR_DEV_NAME, rcv->start_time, rcv->fmt, rcv->fs,
+            fo, IQ, bits);
+    }
 }
 
 //------------------------------------------------------------------------------
@@ -1468,9 +1508,6 @@ void sdr_rcv_stop(sdr_rcv_t *rcv)
     rcv->state = 0;
     sdr_thread_join(rcv->thread);
     
-    for (int i = 0; i < 4; i++) {
-        sdr_str_close(rcv->strs[i]);
-    }
     for (int i = 0; i < SDR_MAX_RFCH; i++) {
         sdr_free(rcv->rfch[i].LUT);
         rcv->rfch[i].LUT = NULL;
@@ -1480,7 +1517,13 @@ void sdr_rcv_stop(sdr_rcv_t *rcv)
     time2str(stop_time, tstr, 1);
     sdr_log(3, "$LOG,%.3f,%s,%d,STOP %s", get_buff_ix(rcv) * SDR_CYC, "", 0,
         tstr);
-    sdr_log_close();
+    // close output streams
+    for (int i = 0; i < SDR_MAX_STR; i++) {
+        if (rcv->str_type[i] == SDR_STR_LOG) sdr_log_rm_str(rcv->strs[i]);
+        sdr_str_close(rcv->strs[i]);
+        rcv->strs[i] = NULL;
+        rcv->str_type[i] = SDR_STR_NONE;
+    }
     if (strstr(rcv->opt, "-TRACE")) {
         traceclose();
     }
@@ -1657,6 +1700,7 @@ void sdr_rcv_array_calib(sdr_rcv_t *rcv, const obsd_t *obs, int nobs,
 //      bus       (I)  USB bus number of SDR device (-1:any)
 //      port      (I)  USB port number of SDR device (-1:any)
 //      conf_file (I)  configuration file for SDR device ("": no config)
+//      types     (I)  output stream types as same as sdr_rcv_start()
 //      paths     (I)  output stream paths as same as sdr_rcv_start()
 //      opt       (I)  receiver options (string separated by spaces)
 //                     -RFCH <sig>:<ch>[{,|-}<ch>...]
@@ -1677,7 +1721,8 @@ void sdr_rcv_array_calib(sdr_rcv_t *rcv, const obsd_t *obs, int nobs,
 //      SDR receiver (NULL: error)
 //
 sdr_rcv_t *sdr_rcv_open_dev(const char **sigs, int *prns, int n, int bus,
-    int port, const char *conf_file, const char **paths, const char *opt)
+    int port, const char *conf_file, const int *types, const char **paths,
+    const char *opt)
 {
     sdr_dev_t *dev;
     double fs, fo[SDR_MAX_RFCH] = {0};
@@ -1698,7 +1743,7 @@ sdr_rcv_t *sdr_rcv_open_dev(const char **sigs, int *prns, int n, int bus,
         return NULL;
     }
     sdr_rcv_t *rcv = sdr_rcv_new(sigs, prns, n, fmt, fs, fo, IQ, bits, opt);
-    if (!sdr_rcv_start(rcv, SDR_DEV_USB, (void *)dev, paths)) {
+    if (!sdr_rcv_start(rcv, SDR_DEV_USB, (void *)dev, types, paths)) {
         sdr_dev_close(dev);
         sdr_rcv_free(rcv);
         return NULL;
@@ -1717,6 +1762,7 @@ sdr_rcv_t *sdr_rcv_open_dev(const char **sigs, int *prns, int n, int bus,
 //      fmt       (I)  Sampling data format (CS8 or CS16)
 //      rate      (I)  Sampling rate (sps)
 //      freq      (I)  Carrier center frequency (Hz)
+//      types     (I)  output stream types as same as sdr_rcv_start()
 //      paths     (I)  output stream paths as same as sdr_rcv_start()
 //      opt       (I)  receiver options (same as sdr_rcv_open_dev())
 //
@@ -1724,8 +1770,8 @@ sdr_rcv_t *sdr_rcv_open_dev(const char **sigs, int *prns, int n, int bus,
 //      SDR receiver (NULL: error)
 //
 sdr_rcv_t *sdr_rcv_open_sdev(const char **sigs, int *prns, int n,
-    const char *driver, int fmt, double rate, double freq, const char **paths,
-    const char *opt)
+    const char *driver, int fmt, double rate, double freq, const int *types,
+    const char **paths, const char *opt)
 {
     sdr_sdev_t *sdev;
     const char *p;
@@ -1742,7 +1788,7 @@ sdr_rcv_t *sdr_rcv_open_sdev(const char **sigs, int *prns, int n,
     IQ[0] = 2;
     bits[0] = 16;
     sdr_rcv_t *rcv = sdr_rcv_new(sigs, prns, n, fmt, fs, fo, IQ, bits, opt);
-    if (!sdr_rcv_start(rcv, SDR_DEV_SOAPY, (void *)sdev, paths)) {
+    if (!sdr_rcv_start(rcv, SDR_DEV_SOAPY, (void *)sdev, types, paths)) {
         sdr_sdev_close(sdev);
         sdr_rcv_free(rcv);
         return NULL;
@@ -1753,7 +1799,8 @@ sdr_rcv_t *sdr_rcv_open_sdev(const char **sigs, int *prns, int n,
 // open local file and start receiver ------------------------------------------
 static sdr_rcv_t *rcv_open_file(const char **sigs, int *prns, int n, int fmt,
     double fs, const double *fo, const int *IQ, const int *bits, double toff,
-    double tscale, const char *file, const char **paths, const char *opt)
+    double tscale, const char *file, const int *types, const char **paths,
+    const char *opt)
 {
     FILE *fp;
     double fo_t[SDR_MAX_RFCH] = {0};
@@ -1777,7 +1824,7 @@ static sdr_rcv_t *rcv_open_file(const char **sigs, int *prns, int n, int fmt,
     sdr_rcv_t *rcv = sdr_rcv_new(sigs, prns, n, fmt, fs, fo_t, IQ_t, bits_t,
         opt);
     rcv->tscale = tscale;
-    if (!sdr_rcv_start(rcv, SDR_DEV_FILE, (void *)fp, paths)) {
+    if (!sdr_rcv_start(rcv, SDR_DEV_FILE, (void *)fp, types, paths)) {
         fclose(fp);
         sdr_rcv_free(rcv);
         return NULL;
@@ -1788,7 +1835,7 @@ static sdr_rcv_t *rcv_open_file(const char **sigs, int *prns, int n, int fmt,
 // open stream and start receiver ----------------------------------------------
 static sdr_rcv_t *rcv_open_str(const char **sigs, int *prns, int n, int fmt,
     double fs, const double *fo, const int *IQ, const int *bits,
-    const char *path, const char **paths, const char *opt)
+    const char *path, const int *types, const char **paths, const char *opt)
 {
     stream_t *str = strnew();
     
@@ -1798,7 +1845,7 @@ static sdr_rcv_t *rcv_open_str(const char **sigs, int *prns, int n, int fmt,
         return NULL;
     }
     sdr_rcv_t *rcv = sdr_rcv_new(sigs, prns, n, fmt, fs, fo, IQ, bits, opt);
-    if (!sdr_rcv_start(rcv, SDR_DEV_STR, (void *)str, paths)) {
+    if (!sdr_rcv_start(rcv, SDR_DEV_STR, (void *)str, types, paths)) {
         strclose(str);
         strfree(str);
         sdr_rcv_free(rcv);
@@ -1822,6 +1869,7 @@ static sdr_rcv_t *rcv_open_str(const char **sigs, int *prns, int n, int fmt,
 //      toff      (I)  time offset of IF data file (s)
 //      tscale    (I)  time scale of replay IF data file
 //      path      (I)  input IF data path (local file or addr:port)
+//      types     (I)  output stream types as same as sdr_rcv_start()
 //      paths     (I)  output stream paths as same as sdr_rcv_start()
 //      opt       (I)  receiver options (same as sdr_rcv_open_dev())
 //
@@ -1833,17 +1881,18 @@ static sdr_rcv_t *rcv_open_str(const char **sigs, int *prns, int n, int fmt,
 //
 sdr_rcv_t *sdr_rcv_open_file(const char **sigs, int *prns, int n, int fmt,
     double fs, const double *fo, const int *IQ, const int *bits, double toff,
-    double tscale, const char *path, const char **paths, const char *opt)
+    double tscale, const char *path, const int *types, const char **paths,
+    const char *opt)
 {
     const char *p;
     int port;
     
     if ((p = strrchr(path, ':')) && sscanf(p, ":%d", &port)) { // stream
-        return rcv_open_str(sigs, prns, n, fmt, fs, fo, IQ, bits, path, paths,
-            opt);
+        return rcv_open_str(sigs, prns, n, fmt, fs, fo, IQ, bits, path, types,
+            paths, opt);
     } else { // local file
         return rcv_open_file(sigs, prns, n, fmt, fs, fo, IQ, bits, toff, tscale,
-            path, paths, opt);
+            path, types, paths, opt);
     }
 }
 
