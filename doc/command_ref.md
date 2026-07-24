@@ -1,7 +1,7 @@
 # Pocket SDR Command Reference
 
 <div style="text-align: right;">
-<strong>ver.0.17  2026-06-17</strong>
+<strong>ver.0.19  2026-07-20</strong>
 </div>
 
 ---
@@ -364,13 +364,53 @@ The input can be a local file, a TCP stream, a Pocket SDR FE device, or a SoapyS
 - `-h height`
   - Console height (rows) for the runtime status display. [`64`]
 - `-opt file`
-  - System options file. See `app/pocket_trk/pocket_trk_default.conf` for the available keys (loop bandwidths, integration times, C/N0 and carrier-lock thresholds, signal-loss debounce count, `max_acq`, array calibration / beam-forming options, etc.). [none]
+  - System options file. The recognized keys and defaults are listed below; `app/pocket_trk/pocket_trk_default.conf` provides an example profile. [none]
 - `-debug file`
   - Enable RTKLIB trace output to the given file (trace level 3).
 - `-v`
   - Print version and exit.
 - `[file]`
   - Input IF data file path. If omitted and no `-driver` is given, the input is taken from a Pocket SDR FE device. With `<file>.tag` present, format/sampling parameters are auto-configured.
+
+### System option keys
+
+The file passed with `-opt` contains `key = value` entries. Without `-opt`, the
+library defaults below are used. The shipped
+`app/pocket_trk/pocket_trk_default.conf` is an example profile; its differing
+values are shown in the last column.
+
+| Key | Meaning | Library default | Example profile |
+|---|---|---:|---:|
+| `fftw_wisdom` | FFTW wisdom file path (handled by `pocket_trk`) | none | none |
+| `epoch` | PVT epoch interval (s) | `1.0` | `1.0` |
+| `lag_epoch` | Maximum PVT epoch lag (s) | `0.5` | `0.5` |
+| `el_mask` | PVT elevation mask (deg) | `15` | `15` |
+| `sp_corr` | Early/late correlator spacing (chip) | `0.25` | `0.2` |
+| `t_acq` | Normal-acquisition integration time (s) | `0.02` | `0.02` |
+| `t_acq_ext` | Doppler-assisted acquisition integration time (s) | `0.10` | `0.10` |
+| `t_coh` | Requested synchronized-pilot PLL coherent interval (s) | `0.02` | `0.02` |
+| `t_dll` | DLL integration time (s) | `0.02` | `0.02` |
+| `b_dll` | DLL bandwidth (Hz) | `0.25` | `0.5` |
+| `b_pll` | PLL bandwidth (Hz) | `5.0` | `10.0` |
+| `b_fll_w` | Wide FLL bandwidth (Hz) | `5.0` | `10.0` |
+| `b_fll_n` | Narrow FLL bandwidth (Hz) | `2.0` | `5.0` |
+| `max_dop` | Acquisition Doppler limit (Hz) | `5000` | `10000` |
+| `thres_cn0_l` | Normal-acquisition lock threshold (dB-Hz) | `34.0` | `34.0` |
+| `thres_cn0_ext` | Assisted-acquisition threshold floor (dB-Hz) | `30.0` | `30.0` |
+| `thres_cn0_u` | Normal tracking-loss threshold (dB-Hz) | `25.0` | `25.0` |
+| `thres_pli` | Carrier-lock indicator threshold | `0.25` | `0.25` |
+| `lost_th` | Consecutive bad 0.5 s windows before loss | `4` | `4` |
+| `bump_jump` | Enable BOC bump-jump (`0`/`1`) | `0` | `1` |
+| `max_acq` | Longest code period for unassisted scheduling (ms) | `4.0` | `4.0` |
+
+Assisted acquisition uses the larger of `thres_cn0_ext` and the applicable
+tracking-loss threshold plus 1 dB. L6 tracking uses an internal `32.5 dB-Hz`
+loss threshold instead of `thres_cn0_u`. Pilot coherent integration starts only
+after secondary-code synchronization; it falls back to per-code-period Costas
+updates if synchronization is lost or `b_pll * K * T >= 0.4`, where
+`K = max(1, round(t_coh / T))`.
+
+All numeric keys other than `fftw_wisdom` are passed to `sdr_rcv_setopt()`.
 
 
 <div class="pagebreak"></div>

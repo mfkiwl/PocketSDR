@@ -1,7 +1,7 @@
 ﻿# Pocket SDR GNSS SDR Algorithm Description
 
 <div style="text-align: right;">
-<strong>ver.0.18  2026-07-06</strong>
+<strong>ver.0.19  2026-07-20</strong>
 </div>
 
 ---
@@ -593,9 +593,13 @@ Fast-search aiding can request a wider assisted window by setting `fd_ext_n`;
 the same bin spacing is then used across the requested number of bins around
 `fd_ext`.
 
-The receiver accumulates non-coherent correlation power until
-`n_sum * T >= sdr_t_acq` (default `20 ms`). It then searches the Doppler/code
-grid for the maximum power and estimates C/N0 from the peak-to-average ratio:
+The receiver distinguishes normal and Doppler-assisted searches with
+`fd_ext_valid`, so an exact zero-Hz Doppler aid is valid. Normal acquisition
+accumulates until `n_sum * T >= sdr_t_acq` (default `20 ms`). Assisted
+acquisition uses `sdr_t_acq_ext` (default `100 ms`) because its much smaller
+Doppler search space makes longer integration affordable. It then searches the
+Doppler/code grid for the maximum power and estimates C/N0 from the
+peak-to-average ratio:
 
 $$
 C/N_0 =
@@ -605,8 +609,16 @@ C/N_0 =
 )
 $$
 
-If the result exceeds the lock threshold (`sdr_thres_cn0_l`, default
-`34 dB-Hz`), tracking starts with the detected Doppler and code offset.
+For normal acquisition, tracking starts if the result exceeds
+`sdr_thres_cn0_l` (default `34 dB-Hz`). An assisted search instead uses
+
+$$
+\max(C/N_{0,\mathrm{ext}}, C/N_{0,\mathrm{lost}} + 1\ \mathrm{dB})
+$$
+
+where `sdr_thres_cn0_ext` defaults to `30 dB-Hz`, and the lost threshold is
+`sdr_thres_cn0_u` or the L6-specific threshold. The margin prevents immediate
+loss caused by the C/N0 gate; PLI and loop-dynamic limits remain separate.
 Otherwise the channel returns to idle.
 
 ### 3.4 Special Acquisition Cases
@@ -629,6 +641,8 @@ The acquisition state is stored in `sdr_acq_t`:
 | `fds` | Normal Doppler search bin list |
 | `len_fds` | Number of Doppler bins |
 | `fd_ext` | Optional external Doppler assistance |
+| `fd_ext_valid` | Validity flag for `fd_ext`, including an exact 0 Hz aid |
+| `fd_ext_n` | Assisted Doppler-bin count (0 selects the default three bins) |
 | `P_sum` | Non-coherent sum of correlation powers |
 | `n_sum` | Number of coherent code-period searches accumulated |
 
@@ -679,7 +693,7 @@ and satellite Doppler are common between frequencies to first order.
 Each call to `sdr_search_code()` performs one coherent code-period correlation
 for every Doppler bin. The coherent result is converted to power and added to
 `P_sum`. After enough calls, the non-coherent integration interval reaches
-`sdr_t_acq`.
+`sdr_t_acq` for a normal search or `sdr_t_acq_ext` for an assisted search.
 
 The distinction is:
 
@@ -712,7 +726,8 @@ with the receiver's tracking threshold and status display.
 
 The acquisition decision has two outputs:
 
-- if `cn0 >= sdr_thres_cn0_l`, the channel starts tracking;
+- if `cn0` reaches the effective normal or assisted threshold, the channel
+  starts tracking;
 - otherwise the channel sleeps briefly, returns to idle, and may be searched
   again later by the scheduler.
 
@@ -744,7 +759,8 @@ than the discrete bin center and reduces the FLL pull-in burden.
 The implemented acquisition loop for one channel can be expressed as:
 
 ```text
-if external Doppler is available:
+assisted = fd_ext_valid
+if assisted:
     if fd_ext_n is set:
         fds = fd_ext-centered bins with fd_ext_n entries at 0.5/T spacing
     else:
@@ -758,7 +774,11 @@ if P_sum is not allocated:
 sdr_search_code(code_fft, T, buffer, ix, 2N, fs, fi, fds, P_sum)
 n_sum += 1
 
-if n_sum * T >= sdr_t_acq:
+T_acq = sdr_t_acq_ext if assisted else sdr_t_acq
+threshold = max(sdr_thres_cn0_ext, lost_threshold + 1) if assisted
+            else sdr_thres_cn0_l
+
+if n_sum * T >= T_acq:
     cn0, fd_index, code_index = peak_search(P_sum)
     if cn0 >= threshold:
         fd = fine_doppler(P_sum, fd_index)
@@ -892,8 +912,10 @@ Carrier tracking uses a pull-in FLL followed by a PLL.
 During the first `T_FPULLIN = 1.0 s`, an FLL discriminator compares the current
 and previous prompt correlations using dot and cross products. It uses a wide
 bandwidth first, then a narrow bandwidth. After pull-in, a third-order PLL is
-used. For data-bearing signals the carrier discriminator is Costas-style; for
-non-Costas cases it uses the full `atan2` phase.
+used. The normal path uses the channel's Costas/non-Costas discriminator every
+code period. A supported pilot switches to secondary-code-wiped coherent
+prompt sums and a four-quadrant `atan2` discriminator after secondary-code
+sync, as detailed in 4.13.
 
 ### 4.4 Code Tracking
 
@@ -923,18 +945,24 @@ secondary-code polarity is removed from all correlator outputs. If the average
 prompt magnitude falls below a loss threshold at a secondary-code boundary,
 sync is cleared.
 
-C/N0 is estimated every `T_CN0 = 0.5 s` from prompt power and the noise
-correlator:
+C/N0 is estimated every `T_CN0 = 0.5 s` from prompt power and the displaced
+noise correlator. The noise power contained in the prompt is subtracted before
+conversion to dB-Hz:
 
 $$
-C/N_0 =
+\begin{aligned}
+P_S &= \max(P_{\mathrm{prompt}}-P_{\mathrm{noise}},
+             0.01P_{\mathrm{noise}}) \\
+C/N_0 &=
 10\log_{10}
 (
-\frac{P_{\mathrm{prompt}}}{P_{\mathrm{noise}}\,T}
+\frac{P_S}{P_{\mathrm{noise}}\,T}
 )
+\end{aligned}
 $$
 
-The estimate is low-pass filtered.
+The 1% floor avoids a logarithm-domain error when the estimated signal power is
+zero or negative. The estimate is low-pass filtered.
 
 At the same `T_CN0` boundary the receiver also updates a carrier lock indicator
 (PLI), a squaring (Van Dierendonck) detector that is independent of received
@@ -943,17 +971,21 @@ power stays high:
 
 $$
 \mathrm{PLI} =
+\frac{\mathrm{sumD}}{\mathrm{sumPs}} =
 \frac{\sum (I_P^2 - Q_P^2)}{\sum (I_P^2 + Q_P^2)}
 \approx \cos 2\bar{\phi}
 $$
 
 PLI tends to `+1` under phase lock and to `0` when the carrier spins or there is
-only noise. It is computed only for Costas-tracked signals and becomes valid
-after the first `T_CN0` window.
+only noise. The normal path accumulates per-period prompts. A synchronized
+pilot accumulates the coherent prompt sums used by its PLL, so numerator and
+denominator always use the same integration interval. The loss detector uses
+PLI when `ch->costas` is set and it becomes valid after the first `T_CN0`
+window.
 
 Signal loss is decided once per `T_CN0` window (not every epoch). A window is
 flagged bad when the filtered C/N0 falls below the loss threshold
-(`sdr_thres_cn0_u`, `30 dB-Hz` normally, `33 dB-Hz` for L6) **or** the PLI of a
+(`sdr_thres_cn0_u`, `25 dB-Hz` normally, `32.5 dB-Hz` for L6) **or** the PLI of a
 Costas-tracked signal falls below `sdr_thres_pli`. A pessimistic counter
 debounces transients: the channel declares signal loss, returns to idle, and
 becomes eligible for re-acquisition only after `sdr_lost_th` consecutive bad
@@ -982,7 +1014,8 @@ The tracking state is stored in `sdr_trk_t`. Important fields are:
 | `err_phas`, `phas_acc` | PLL discriminator history and third-order accumulator |
 | `err_code`, `code_int` | DLL discriminator history and second-order integrator |
 | `sumP`, `sumN` | Prompt and noise power sums for C/N0 |
-| `sumD` | Prompt `I^2-Q^2` sum for the carrier lock indicator (PLI) |
+| `sumPs`, `sumD` | Matched prompt-power and `I^2-Q^2` sums for PLI |
+| `Cs`, `coh_n` | Coherent prompt sum and its epoch count for pilot tracking |
 | `sumC[]`, `sumI[]` | DLL accumulation buffers |
 | `code` | Resampled tracking code bank |
 | `code_fft` | Chip-domain extended-code FFT for L6 CSK detection |
@@ -992,7 +1025,7 @@ The channel object `sdr_ch_t` stores the loop state that must persist across
 epochs: Doppler, code offset, continuous carrier phase (`phi`), accumulated
 Doppler range, C/N0, carrier lock indicator (`pli`) and its valid flag,
 week/TOW, lock count, loss count and the loss-decision counter (`lost_cnt`),
-Costas/non-Costas mode, and navigation state.
+Costas/non-Costas mode, pilot classification, and navigation state.
 
 `start_track()` resets the dynamic tracking and navigation states. It does not
 regenerate codes or FFTs because those are permanent channel resources. This
@@ -1160,10 +1193,32 @@ source:
 $$
 \begin{aligned}
 W &= \frac{B_{\mathrm{PLL}}}{0.7845} \\
-a_{\phi} &\leftarrow a_{\phi} + W^3 e_{\phi} T \\
-f_d &\leftarrow f_d + 2.4W(e_{\phi}-e_{\phi,\mathrm{prev}}) + 1.1W^2 e_{\phi}T + a_{\phi}T
+\Delta t &= \text{PLL update interval} \\
+a_{\phi} &\leftarrow a_{\phi} + W^3 e_{\phi}\Delta t \\
+f_d &\leftarrow f_d + 2.4W(e_{\phi}-e_{\phi,\mathrm{prev}})
+    + 1.1W^2 e_{\phi}\Delta t + a_{\phi}\Delta t
 \end{aligned}
 $$
+
+For the normal path, `Delta t = T`. For a dataless pilot identified by
+`sdr_sig_pilot()`, secondary-code sync makes the wiped prompt polarity stable.
+The receiver sums
+
+$$
+C_S = \sum_{i=1}^{K} C_{P,i}, \qquad
+K = \max(1, \operatorname{round}(t_{\mathrm{coh}}/T))
+$$
+
+and updates the PLL with `atan2(Im(C_S), Re(C_S))` at
+`Delta t = K*T`. The supported set is L1CP, L5Q, L5SQ, G2OCP, G3OCP, E1C,
+E5AQ, E5ABQ, E5BQ, E6C, B1CP, B2AP and I1SP. If secondary-code sync is lost,
+the channel immediately clears the partial coherent sum and returns to the
+per-period path. If `sdr_b_pll * K * T >= 0.4`, the implementation also falls
+back to the per-period Costas path to avoid an unstable update interval.
+
+`sec_pol` resolves the current half-cycle branch for wipeoff; it is not the
+broadcast overlay sequence itself. Integer carrier ambiguity remains, and a
+polarity change after re-synchronization can cause a half-cycle discontinuity.
 
 The third-order loop can track constant acceleration in carrier phase better
 than a simple first-order or second-order loop. This is useful for live
@@ -1209,9 +1264,11 @@ removes residual code-phase bias.
 
 ### 4.15 Lock, Loss, and Thresholds
 
-The receiver has two C/N0 thresholds with different meanings:
+The receiver has three configurable C/N0 thresholds with different meanings:
 
 - `sdr_thres_cn0_l` is used to start lock after acquisition;
+- `sdr_thres_cn0_ext` is used for Doppler-assisted acquisition, subject to the
+  lost-threshold-plus-1-dB floor described in 3.3;
 - `sdr_thres_cn0_u` is used to declare loss during tracking.
 
 The loss threshold is lower than the acquisition threshold. This hysteresis is
@@ -1319,11 +1376,14 @@ if secondary code can be synchronized:
 
 if inside pull-in time:
     run FLL
+else if synchronized supported pilot and b_pll * K * T < 0.4:
+    sum K secondary-code-wiped prompts
+    run atan2 PLL every K periods with dt = K * T
 else:
-    run PLL
+    run per-period Costas/non-Costas PLL with dt = T
 
 run DLL
-update C/N0
+update noise-subtracted C/N0 and matched-interval PLI
 
 if navigation pull-in reached:
     decode navigation data
@@ -2188,6 +2248,8 @@ they also define the receiver algorithm's practical behavior.
 | `SDR_N_HIST` | `5000` | Prompt-history length |
 | `SP_CORR` | `0.25 chip` | Early/late correlator spacing |
 | `T_ACQ` | `20 ms` | Acquisition non-coherent integration time |
+| `T_ACQ_EXT` | `100 ms` | Assisted-acquisition integration time |
+| `T_COH` | `20 ms` | Requested coherent pilot PLL interval |
 | `T_DLL` | `20 ms` | DLL non-coherent accumulation time |
 | `T_CN0` | `0.5 s` | C/N0 averaging interval |
 | `T_FPULLIN` | `1.0 s` | FLL pull-in duration before PLL |
@@ -2198,7 +2260,9 @@ they also define the receiver algorithm's practical behavior.
 | `B_FLL_N` | `2.0 Hz` | Narrow FLL bandwidth |
 | `MAX_DOP` | `5000 Hz` | Default acquisition Doppler search limit |
 | `THRES_CN0_L` | `34 dB-Hz` | Acquisition lock threshold |
-| `THRES_CN0_U` | `30 dB-Hz` | Tracking loss threshold |
+| `THRES_CN0_EXT` | `30 dB-Hz` | Assisted-acquisition threshold |
+| `THRES_CN0_U` | `25 dB-Hz` | Tracking loss threshold |
+| `THRES_CN0_L6` | `32.5 dB-Hz` | L6 tracking loss threshold |
 
 These values are tuned for a host-based software receiver. They balance
 sensitivity, CPU load, latency, and robustness. Increasing acquisition
@@ -2572,17 +2636,24 @@ $$
 $$
 
 In tracking, the receiver has a prompt correlator and a deliberately displaced
-noise correlator. The prompt/noise power ratio is accumulated over 0.5 s:
+noise correlator. Their powers are accumulated over 0.5 s. The noise reference
+is subtracted from the prompt before forming the ratio:
 
 $$
+\begin{aligned}
+P_S &= \max\left(\sum |P|^2-\sum |N|^2,
+                  0.01\sum |N|^2\right) \\
 (C/N_0)_{\mathrm{trk}} =
 10\log_{10}
 (
-\frac{\sum |P|^2}{T\sum |N|^2}
+\frac{P_S}{T\sum |N|^2}
 )
+\end{aligned}
 $$
 
-Both are practical receiver metrics. They are not identical estimators and
+The subtraction removes the `10*log10(1/T)` low-C/N0 floor of the former
+prompt/noise ratio. Both are practical receiver metrics. They are not
+identical estimators and
 should not be expected to match exactly at lock transition. The acquisition
 metric is used for detection; the tracking metric is used for status and loss
 detection.

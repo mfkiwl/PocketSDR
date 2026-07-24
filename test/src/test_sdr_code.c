@@ -101,7 +101,7 @@ static void test_sdr_sat_id_api(void)
     TEST_ASSERT_TRUE(!strcmp(sat, "???"));
     
     sdr_sat_id("B1CP", 1, sat);
-    TEST_ASSERT_TRUE(!strcmp(sat, "???"));
+    TEST_ASSERT_TRUE(!strcmp(sat, "C01"));
 }
 
 // test sdr_sig_boc() ----------------------------------------------------------
@@ -111,6 +111,21 @@ static void test_sdr_sig_boc_api(void)
     TEST_ASSERT_EQ_INT(1, sdr_sig_boc("L1CP"));
     TEST_ASSERT_EQ_INT(1, sdr_sig_boc("e1b"));
     TEST_ASSERT_EQ_INT(0, sdr_sig_boc("UNKNOWN"));
+}
+
+// test sdr_sig_pilot() --------------------------------------------------------
+static void test_sdr_sig_pilot_api(void)
+{
+    const char *pilots[] = {"L1CP", "L5Q", "L5SQ", "G2OCP", "G3OCP",
+        "E1C", "E5AQ", "E5ABQ", "E5BQ", "E6C", "B1CP", "B2AP", "I1SP"};
+
+    for (int i = 0; i < (int)(sizeof(pilots) / sizeof(*pilots)); i++) {
+        TEST_ASSERT_EQ_INT(1, sdr_sig_pilot(pilots[i]));
+    }
+    TEST_ASSERT_EQ_INT(1, sdr_sig_pilot("e1c"));
+    TEST_ASSERT_EQ_INT(0, sdr_sig_pilot("L1CA"));
+    TEST_ASSERT_EQ_INT(0, sdr_sig_pilot("E1B"));
+    TEST_ASSERT_EQ_INT(0, sdr_sig_pilot("UNKNOWN"));
 }
 
 // test sdr_res_code() ---------------------------------------------------------
@@ -185,6 +200,7 @@ int main(void)
     TEST_RUN(test_code_attributes_api);
     TEST_RUN(test_sdr_sat_id_api);
     TEST_RUN(test_sdr_sig_boc_api);
+    TEST_RUN(test_sdr_sig_pilot_api);
     TEST_RUN(test_sdr_res_code_api);
     TEST_RUN(test_sdr_gen_code_fft_api);
     

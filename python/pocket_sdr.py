@@ -10,6 +10,7 @@
 #  2025-03-19  1.1  ver.0.14
 #  2026-05-02  1.2  ver.0.15
 #  2026-06-01  1.3  ver.0.16
+#  2026-07-19  1.4  add low-C/N0 acquisition and tracking options
 #
 import sys, os, platform, time, re, shutil
 from collections import deque
@@ -180,7 +181,7 @@ def rcv_opt_str(sys_opt, inp_opt, sig_opt, array_opt):
     opt += ' ' + inp_opt.dev_opt.get()
     opt += ' ' + lpf_opt_str(inp_opt)
     opt += ' ' + '-RFCH ' + sig_opt.sig_rfch.get()
-    if sys_opt.acq_mode.get() == 'Fast-Search':
+    if sys_opt.acq_mode.get() in ('Fast', 'Fast-Search'):
         opt += ' -FAST_SRCH'
     if out_opt.array_sep.get():
         opt += ' -ARRAY'
@@ -324,6 +325,8 @@ def set_rcv_opts(sys_opt):
     libsdr.sdr_rcv_setopt('el_mask'.encode()  , float(sys_opt.el_mask.get()))
     libsdr.sdr_rcv_setopt('sp_corr'.encode()  , float(sys_opt.sp_corr.get()))
     libsdr.sdr_rcv_setopt('t_acq'.encode()    , float(sys_opt.t_acq.get()))
+    libsdr.sdr_rcv_setopt('t_acq_ext'.encode(), float(sys_opt.t_acq_ext.get()))
+    libsdr.sdr_rcv_setopt('t_coh'.encode()    , float(sys_opt.t_coh.get()))
     libsdr.sdr_rcv_setopt('t_dll'.encode()    , float(sys_opt.t_dll.get()))
     libsdr.sdr_rcv_setopt('b_dll'.encode()    , float(sys_opt.b_dll.get()))
     libsdr.sdr_rcv_setopt('b_pll'.encode()    , float(sys_opt.b_pll.get()))
@@ -331,6 +334,8 @@ def set_rcv_opts(sys_opt):
     libsdr.sdr_rcv_setopt('b_fll_n'.encode()  , float(sys_opt.b_fll_n.get()))
     libsdr.sdr_rcv_setopt('max_dop'.encode()  , float(sys_opt.max_dop.get()))
     libsdr.sdr_rcv_setopt('thres_cn0_l'.encode(), float(sys_opt.thres_cn0_l.get()))
+    libsdr.sdr_rcv_setopt('thres_cn0_ext'.encode(),
+        float(sys_opt.thres_cn0_ext.get()))
     libsdr.sdr_rcv_setopt('thres_cn0_u'.encode(), float(sys_opt.thres_cn0_u.get()))
     libsdr.sdr_rcv_setopt('thres_pli'.encode(), float(sys_opt.thres_pli.get()))
     libsdr.sdr_rcv_setopt('lost_th'.encode()  , float(sys_opt.lost_th.get()))
@@ -827,8 +832,7 @@ def update_rcv_stat(p):
         'IF Data Rate (MB/s)', 'IF Data Buffer Usage (%)', 'Time (GPST)',
         'Solution Status', 'Latitude (\xb0)', 'Longitude (\xb0)',
         'Altitude (m)', 'Roll/Pitch/Yaw (\xb0)', '# Sats Used/All',
-        'Solution Latency (s)', 'Output', '# PVT/OBS/NAV Data',
-        'IF Data Log (MB)')
+        'Solution Latency (s)', 'Output', '# PVT/OBS/NAV', 'IF Data Log (MB)')
     stat = get_rcv_stat(rcv_body).split()
     sol = get_rcv_pvt_sol(rcv_body).split()
     arr = array_calib_stat(rcv_body)

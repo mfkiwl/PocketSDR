@@ -37,6 +37,7 @@
 //                   support sdr_corr_std() API change
 //  2026-07-19  1.25 add pre-combined E5ABQ replicas (a+b, a-b) to correlate
 //                   both sidebands in one pass once the polarity is calibrated
+//  2026-07-19  1.26 improve low-C/N0 acquisition and pilot tracking
 //
 #include <ctype.h>
 #include <math.h>
@@ -45,6 +46,8 @@
 // constants and macros --------------------------------------------------------
 #define SP_CORR    0.25     // correlator spacing (chip)
 #define T_ACQ      0.02     // non-coherent integration time for acquisition (s)
+#define T_ACQ_EXT  0.10     // integration time for assisted acquisition (s)
+#define T_COH      0.02     // coherent integration time for pilot PLL (s)
 #define T_DLL      0.02     // non-coherent integration time for DLL (s)
 #define T_CN0      0.5      // averaging time for C/N0 (s)
 #define T_FPULLIN  1.0      // frequency pull-in time (s)
@@ -56,8 +59,9 @@
 #define B_FLL_N    2.0      // band-width of FLL filter (Hz) (narrow)
 #define MAX_DOP    5000.0   // max Doppler for acquisition (Hz)
 #define THRES_CN0_L 34.0    // C/N0 threshold (dB-Hz) (lock)
-#define THRES_CN0_U 30.0    // C/N0 threshold (dB-Hz) (lost)
-#define THRES_CN0_L6 33.0   // C/N0 threshold (dB-Hz) (L6D/E lost)
+#define THRES_CN0_U 25.0    // C/N0 threshold (dB-Hz) (lost)
+#define THRES_CN0_EXT 30.0  // C/N0 threshold (dB-Hz) (assisted acquisition)
+#define THRES_CN0_L6 32.5   // C/N0 threshold (dB-Hz) (L6D/E lost)
 #define THRES_PLI  0.25     // carrier lock detector threshold (cos 2*phi)
 #define LOST_TH    4        // lost decision count (C/N0/PLI windows of T_CN0)
 #define THRES_SYNC 0.02     // threshold for sec-code sync
@@ -79,6 +83,8 @@
 // global variables ------------------------------------------------------------
 double sdr_sp_corr = SP_CORR;
 double sdr_t_acq   = T_ACQ;
+double sdr_t_acq_ext = T_ACQ_EXT;
+double sdr_t_coh   = T_COH;
 double sdr_t_dll   = T_DLL;
 double sdr_b_dll   = B_DLL;
 double sdr_b_pll   = B_PLL;
@@ -87,6 +93,7 @@ double sdr_b_fll_n = B_FLL_N;
 double sdr_max_dop = MAX_DOP;
 double sdr_thres_cn0_l = THRES_CN0_L;
 double sdr_thres_cn0_u = THRES_CN0_U;
+double sdr_thres_cn0_ext = THRES_CN0_EXT;
 double sdr_thres_pli = THRES_PLI; // carrier lock detector threshold
 int sdr_lost_th = LOST_TH; // lost decision count
 int sdr_bump_jump = 0;
@@ -294,6 +301,7 @@ static sdr_acq_t *acq_new(const char *sig, int prn, const int8_t *code,
         sdr_gen_code_fft(code, NULL, len_code, T, 0.0, fs, N, N, acq->code_fft);
     }
     acq->fd_ext = 0.0;
+    acq->fd_ext_valid = 0;
     acq->fds = sdr_dop_bins(T, 0.0f, (float)sdr_max_dop, &acq->len_fds);
     acq->P_sum = NULL;
     acq->n_sum = 0;
@@ -361,7 +369,10 @@ static sdr_trk_t *trk_new(const char *sig, int prn, const int8_t *code,
     trk->csk_ref = -1;
     trk->err_phas = trk->err_code = 0.0;
     trk->phas_acc = trk->code_int = 0.0;
-    trk->sumP = trk->sumN = trk->sumVE = trk->sumVL = trk->sumD = 0.0;
+    trk->sumP = trk->sumN = trk->sumVE = trk->sumVL = 0.0;
+    trk->sumPs = trk->sumD = 0.0;
+    trk->Cs[0] = trk->Cs[1] = 0.0f;
+    trk->coh_n = 0;
     memset(trk->sumC, 0, sizeof(double) * SDR_MAX_CORR);
     memset(trk->sumI, 0, sizeof(double) * SDR_MAX_CORR);
     memset(trk->aveP, 0, sizeof(double) * SDR_MAX_CORR);
@@ -453,6 +464,7 @@ sdr_ch_t *sdr_ch_new(const char *sig, int prn, double fs, double fi)
     ch->fd = ch->coff = ch->phi = ch->adr = ch->cn0 = ch->pli = 0.0;
     ch->lock = ch->lost = ch->lost_cnt = ch->pli_valid = 0;
     ch->costas = strcmp(ch->sig, "L6D") && strcmp(ch->sig, "L6E");
+    ch->pilot = sdr_sig_pilot(ch->sig);
     ch->obs_idx = -1;
     ch->acq = acq_new(ch->sig, ch->prn, ch->code, ch->len_code, ch->T, fs,
         ch->N);
@@ -490,7 +502,10 @@ static void trk_init(sdr_trk_t *trk)
     trk->phas_acc = trk->code_int = 0.0;
     trk->sec_sync = trk->sec_pol = 0;
     trk->csk_ref = -1;
-    trk->sumP = trk->sumN = trk->sumVE = trk->sumVL = trk->sumD = 0.0;
+    trk->sumP = trk->sumN = trk->sumVE = trk->sumVL = 0.0;
+    trk->sumPs = trk->sumD = 0.0;
+    trk->Cs[0] = trk->Cs[1] = 0.0f;
+    trk->coh_n = 0;
     memset(trk->C, 0, sizeof(sdr_cpx_t) * SDR_MAX_CORR);
     trk->C0[0] = trk->C0[1] = trk->C1[0] = trk->C1[1] = 0.0;
     memset(trk->P, 0, sizeof(sdr_cpx_t) * SDR_N_HIST);
@@ -527,9 +542,10 @@ static void search_sig(sdr_ch_t *ch, double time, const sdr_buff_t *buff,
 {
     float *fds = ch->acq->fds;
     float *fd_ext_bins = NULL;
+    int assisted = ch->acq->fd_ext_valid;
     int n = ch->acq->len_fds;
     
-    if (ch->acq->fd_ext != 0.0) { // assist by external Doppler
+    if (assisted) { // assist by external Doppler
         int nw = (ch->acq->fd_ext_n > 0) ? ch->acq->fd_ext_n : 3;
         fd_ext_bins = (float *)sdr_malloc(sizeof(float) * nw);
         for (int k = 0; k < nw; k++) {
@@ -548,14 +564,21 @@ static void search_sig(sdr_ch_t *ch, double time, const sdr_buff_t *buff,
         ch->fi, fds, n, ch->acq->P_sum);
     ch->acq->n_sum++;
     
-    if (ch->acq->n_sum * ch->T >= sdr_t_acq) {
+    double t_acq = assisted ? sdr_t_acq_ext : sdr_t_acq;
+    if (ch->acq->n_sum * ch->T >= t_acq) {
         int idx[2];
         
         // search max correlation power
         float cn0 = sdr_corr_max(ch->acq->P_sum, 2 * ch->N, ch->N, n, ch->T,
             idx);
         
-        if (cn0 >= sdr_thres_cn0_l) {
+        double thres = sdr_thres_cn0_l;
+        if (assisted) {
+            double lost = !strncmp(ch->sig, "L6", 2) ? THRES_CN0_L6 :
+                sdr_thres_cn0_u;
+            thres = MAX(sdr_thres_cn0_ext, lost + 1.0);
+        }
+        if (cn0 >= thres) {
             double fd = sdr_fine_dop(ch->acq->P_sum, 2 * ch->N, fds, n, idx);
             double coff = idx[1] / ch->fs;
             start_track(ch, time, fd, coff, cn0);
@@ -571,6 +594,7 @@ static void search_sig(sdr_ch_t *ch, double time, const sdr_buff_t *buff,
         ch->acq->P_sum = NULL;
         ch->acq->n_sum = 0;
         ch->acq->fd_ext = 0.0;
+        ch->acq->fd_ext_valid = 0;
         ch->acq->fd_ext_n = 0;
     }
     sdr_free(fd_ext_bins);
@@ -634,16 +658,14 @@ static void FLL(sdr_ch_t *ch)
 }
 
 // PLL (3rd-order, a3=1.1, b3=2.4, Bn=W/0.7845) --------------------------------
-static void PLL(sdr_ch_t *ch)
+static void PLL(sdr_ch_t *ch, double IP, double QP, double dt, int costas)
 {
-    double IP = ch->trk->C[0][0];
-    double QP = ch->trk->C[0][1];
-    if (IP != 0.0) {
-        double err_phas = (ch->costas ? atan(QP / IP) : atan2(QP, IP)) / DPI;
+    if (IP != 0.0 || (!costas && QP != 0.0)) {
+        double err_phas = (costas ? atan(QP / IP) : atan2(QP, IP)) / DPI;
         double W = sdr_b_pll / 0.7845;
-        ch->trk->phas_acc += W * W * W * err_phas * ch->T;
+        ch->trk->phas_acc += W * W * W * err_phas * dt;
         ch->fd += 2.4 * W * (err_phas - ch->trk->err_phas) +
-            1.1 * W * W * err_phas * ch->T + ch->trk->phas_acc * ch->T;
+            1.1 * W * W * err_phas * dt + ch->trk->phas_acc * dt;
         ch->trk->err_phas = err_phas;
     }
 }
@@ -705,12 +727,14 @@ static void bump_jump(sdr_ch_t *ch)
 }
 
 // update C/N0 and carrier lock indicator (returns 1 at decision window) --------
-static int CN0(sdr_ch_t *ch)
+static int CN0(sdr_ch_t *ch, double IPs, double QPs, int pli_upd)
 {
     ch->trk->sumP +=
         SQR(ch->trk->P[SDR_N_HIST-1][0]) + SQR(ch->trk->P[SDR_N_HIST-1][1]);
-    ch->trk->sumD += // IP^2 - QP^2 for carrier lock detector (cos 2*phi)
-        SQR(ch->trk->P[SDR_N_HIST-1][0]) - SQR(ch->trk->P[SDR_N_HIST-1][1]);
+    if (pli_upd) {
+        ch->trk->sumD += SQR(IPs) - SQR(QPs);
+        ch->trk->sumPs += SQR(IPs) + SQR(QPs);
+    }
     ch->trk->sumN += SQR(ch->trk->C[3][0]) + SQR(ch->trk->C[3][1]);
     if (ch->trk->npos >= 6) {
         ch->trk->sumVE += SQR(ch->trk->C[4][0]) + SQR(ch->trk->C[4][1]);
@@ -718,18 +742,21 @@ static int CN0(sdr_ch_t *ch)
     }
     if (ch->lock % (int)(T_CN0 / ch->T) != 0) return 0;
     
-    if (ch->trk->sumP > 0.0) {
-        ch->pli = ch->trk->sumD / ch->trk->sumP; // cos 2*phi in [-1,1]
+    if (ch->trk->sumPs > 0.0) {
+        ch->pli = ch->trk->sumD / ch->trk->sumPs; // cos 2*phi in [-1,1]
         ch->pli_valid = 1;
     }
     if (ch->trk->sumN > 0.0) {
-        double cn0 = 10.0 * log10(ch->trk->sumP / ch->trk->sumN / ch->T);
+        double S = MAX(ch->trk->sumP - ch->trk->sumN,
+            0.01 * ch->trk->sumN);
+        double cn0 = 10.0 * log10(S / ch->trk->sumN / ch->T);
         ch->cn0 += FILT_CN0 * (cn0 - ch->cn0);
     }
     if (ch->trk->npos >= 6) {
         bump_jump(ch);
     }
-    ch->trk->sumP = ch->trk->sumN = ch->trk->sumD = 0.0;
+    ch->trk->sumP = ch->trk->sumN = 0.0;
+    ch->trk->sumPs = ch->trk->sumD = 0.0;
     return 1;
 }
 
@@ -893,14 +920,44 @@ static void track_sig(sdr_ch_t *ch, double time, const sdr_buff_t *buff, int ix)
     if (ch->len_sec_code >= 2 && ch->lock * ch->T >= T_NPULLIN) {
         sync_sec_code(ch, ch->len_sec_code);
     }
-    // FLL/PLL, DLL and update C/N0 
+    // FLL/PLL, DLL and update C/N0
+    double IP = ch->trk->C[0][0];
+    double QP = ch->trk->C[0][1];
+    double IPs = ch->trk->P[SDR_N_HIST-1][0];
+    double QPs = ch->trk->P[SDR_N_HIST-1][1];
+    int pli_upd = 1;
     if (ch->lock * ch->T <= T_FPULLIN) {
         FLL(ch);
+        ch->trk->Cs[0] = ch->trk->Cs[1] = 0.0f;
+        ch->trk->coh_n = 0;
+    } else if (ch->pilot && ch->trk->sec_sync > 0) {
+        int K = MAX(1, (int)(sdr_t_coh / ch->T + 0.5));
+        double dt = K * ch->T;
+        if (sdr_b_pll * dt < 0.4) {
+            ch->trk->Cs[0] += (float)IP;
+            ch->trk->Cs[1] += (float)QP;
+            ch->trk->coh_n++;
+            pli_upd = 0;
+            if (ch->trk->coh_n >= K) {
+                IPs = ch->trk->Cs[0];
+                QPs = ch->trk->Cs[1];
+                PLL(ch, IPs, QPs, dt, 0);
+                ch->trk->Cs[0] = ch->trk->Cs[1] = 0.0f;
+                ch->trk->coh_n = 0;
+                pli_upd = 1;
+            }
+        } else {
+            PLL(ch, IP, QP, ch->T, ch->costas);
+            ch->trk->Cs[0] = ch->trk->Cs[1] = 0.0f;
+            ch->trk->coh_n = 0;
+        }
     } else {
-        PLL(ch);
+        PLL(ch, IP, QP, ch->T, ch->costas);
+        ch->trk->Cs[0] = ch->trk->Cs[1] = 0.0f;
+        ch->trk->coh_n = 0;
     }
     DLL(ch);
-    int cn0_upd = CN0(ch);
+    int cn0_upd = CN0(ch, IPs, QPs, pli_upd);
     
     // decode navigation data
     if (ch->lock * ch->T >= T_NPULLIN) {

@@ -22,6 +22,7 @@
 //  2026-06-01  1.14 ver.0.16
 //  2026-06-17  1.15 ver.0.17
 //  2026-07-05  1.16 ver.0.18
+//  2026-07-19  1.17 support extended coherent tracking for pilot signals
 //
 #ifndef POCKET_SDR_H
 #define POCKET_SDR_H
@@ -163,7 +164,8 @@ typedef struct {                // signal acquisition type
     sdr_cpx_t *code_fft;        // code FFT
     float *fds;                 // Doppler bins
     int len_fds;                // length of Doppler bins
-    float fd_ext;               // Doppler external assist (Hz, 0=none)
+    float fd_ext;               // Doppler external assist (Hz)
+    int fd_ext_valid;           // external Doppler assist validity flag
     int fd_ext_n;               // number of Doppler bins for fd_ext (0=3)
     float *P_sum;               // sum of correlation powers
     int n_sum;                  // number of sum
@@ -183,7 +185,9 @@ typedef struct {                // signal tracking type
     double phas_acc;            // 3rd-order PLL acceleration accumulator (Hz/s)
     double code_int;            // 2nd-order DLL integrator (s/s)
     double sumP, sumN, sumVE, sumVL; // sum of correlations
-    double sumD;                // sum of (IP^2-QP^2) for carrier lock detector
+    double sumPs, sumD;         // sums for carrier lock detector
+    sdr_cpx_t Cs;               // coherent prompt sum for pilot tracking
+    int coh_n;                  // number of prompts in coherent sum
     double sumC[SDR_MAX_CORR];  // sum of correlations DLL
     double sumI[SDR_MAX_CORR];  // sum of I*sign(IP) DLL (data-wipe-off)
     double aveP[SDR_MAX_CORR];  // average of correlation powers
@@ -240,6 +244,7 @@ typedef struct {                // SDR receiver channel type
     int lost_cnt;               // lost decision counter (C/N0/PLI windows)
     int pli_valid;              // PLI valid flag (0: before first C/N0 window)
     int costas;                 // Costas PLL flag
+    int pilot;                  // dataless pilot with secondary code flag
     int obs_idx;                // observation data index
     sdr_acq_t *acq;             // signal acquisition
     sdr_trk_t *trk;             // signal tracking
@@ -475,6 +480,7 @@ int sdr_code_len(const char *sig);
 double sdr_sig_freq(const char *sig);
 void sdr_sat_id(const char *sig, int prn, char *sat);
 int sdr_sig_boc(const char *sig);
+int sdr_sig_pilot(const char *sig);
 int sdr_code_scale(const char *sig);
 // Pass code_Q = NULL for real (BPSK) codes; non-NULL for complex codes.
 void sdr_res_code(const int8_t *code_I, const int8_t *code_Q, int len_code,

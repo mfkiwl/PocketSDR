@@ -76,6 +76,7 @@
 //  2025-11-20  1.17 add Galileo E5a-QP as E5AQP
 //  2026-07-08  1.18 E1B/E1C modulation: BOC(1,1) -> CBOC(6,1,1/11)
 //                   add API sdr_code_scale()
+//  2026-07-19  1.19 add API sdr_sig_pilot()
 //
 #include <ctype.h>
 #include "pocket_sdr.h"
@@ -2517,14 +2518,7 @@ void sdr_sat_id(const char *sig, int prn, char *sat)
     } else if (Sig[0] == 'E' && prn >= 1 && prn <= 36) { // Galileo
         sprintf(sat, "E%02d", prn);
     } else if (Sig[0] == 'B' && prn >= 1 && prn <= 63) { // BDS
-        if ((!strncmp(Sig, "B1C", 3) || !strncmp(Sig, "B2A", 3)) &&
-            (prn < 19 || prn > 58)) {
-            sprintf(sat, "???");
-        } else if (!strcmp(Sig, "B2I") && prn > 18) {
-            sprintf(sat, "???");
-        } else {
-            sprintf(sat, "C%02d", prn);
-        }
+        sprintf(sat, "C%02d", prn);
     } else if (Sig[0] == 'I' && prn >= 1 && prn <= 14) { // NavIC
         sprintf(sat, "I%02d", prn);
     } else {
@@ -2552,6 +2546,30 @@ int sdr_sig_boc(const char *sig)
         !strcmp(Sig, "E1C") || !strcmp(Sig, "L1CB") || !strcmp(Sig, "B1CD") ||
         !strcmp(Sig, "B1CP") || !strcmp(Sig, "I1SP") || !strcmp(Sig, "I1SD") ||
         !strcmp(Sig, "E5ABQ");
+}
+
+//------------------------------------------------------------------------------
+//  Test if a signal is a dataless pilot with a secondary code.
+//
+//  args:
+//      sig      (I) Signal type as string ('L1CA', 'L1CB', 'L1CP', ....)
+//
+//  return:
+//      1: pilot signal, 0: other signal
+//
+int sdr_sig_pilot(const char *sig)
+{
+    char Sig[16];
+
+    sig_upper(sig, Sig);
+
+    return !strcmp(Sig, "L1CP") || !strcmp(Sig, "L5Q" ) ||
+        !strcmp(Sig, "L5SQ") || !strcmp(Sig, "G2OCP") ||
+        !strcmp(Sig, "G3OCP") || !strcmp(Sig, "E1C"  ) ||
+        !strcmp(Sig, "E5AQ") || !strcmp(Sig, "E5ABQ") ||
+        !strcmp(Sig, "E5BQ") || !strcmp(Sig, "E6C"  ) ||
+        !strcmp(Sig, "B1CP") || !strcmp(Sig, "B2AP" ) ||
+        !strcmp(Sig, "I1SP");
 }
 
 //------------------------------------------------------------------------------

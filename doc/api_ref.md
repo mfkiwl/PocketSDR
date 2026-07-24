@@ -1,7 +1,7 @@
 # Pocket SDR C Library API Reference
 
 <div style="text-align: right;">
-<strong>ver.0.18  2026-07-06</strong>
+<strong>ver.0.19  2026-07-20</strong>
 </div>
 
 ---
@@ -41,7 +41,7 @@ This API reference describes the **Pocket SDR** C library (`libsdr`). The librar
 - Scope and capabilities
   - Front-end I/O: Pocket SDR FE 2/4/8CH (Cypress EZ-USB), generic SoapySDR devices, IF data files, and TCP streams.
   - IF data processing: real (I) and complex (IQ) sampling, bit-packed RAW8 / RAW16 / RAW16I / RAW32 formats, fs/4 real-to-complex mixing, optional FIR LPF.
-  - Acquisition and tracking: FFT-based code search, Doppler bin generation, fine Doppler estimation, multi-correlator (E/P/L plus 81 extra) DLL/PLL, Costas option.
+  - Acquisition and tracking: FFT-based code search with optional Doppler assistance and extended integration, fine Doppler estimation, multi-correlator DLL/PLL, noise-subtracted C/N0, Costas tracking, and coherent PLL updates for synchronized pilot signals.
   - Navigation decoding: per-system frame sync, convolutional / Reed-Solomon / LDPC / NB-LDPC decoders.
   - PVT: RTKLIB-based single-point positioning with antenna offsets and DCB; outputs include NMEA, RTCM3 obs/nav, and IF data log streams.
   - Antenna array: per-epoch EKF calibration of attitude (roll/pitch/yaw) and per-RF-CH hardware delays; beam-forming with quantized weights and up to 8 array channels.
@@ -183,11 +183,11 @@ This API reference describes the **Pocket SDR** C library (`libsdr`). The librar
 <br><br>
 
 - `sdr_acq_t`
-  - Acquisition state: code FFT, Doppler bin array, current Doppler external assist, accumulated correlation power and accumulation count.
+  - Acquisition state: code FFT, Doppler bin array, external Doppler assist value plus explicit validity and assisted-bin count (`fd_ext_valid`, `fd_ext_n`), accumulated correlation power, and accumulation count.
 <br><br>
 
 - `sdr_trk_t`
-  - Tracking state: correlator positions and complex outputs; P history (`SDR_N_HIST`); secondary code sync/polarity; L6 CSK code-shift reference (`csk_ref`); phase / code error; accumulators for DLL/PLL; resampled real code bank (`int8_t`), complex code bank (E5ABQ) and the chip-domain extended-code FFT for L6 CSK detection.
+  - Tracking state: correlator positions and complex outputs; P history (`SDR_N_HIST`); secondary code sync/polarity; L6 CSK code-shift reference (`csk_ref`); phase/code error; DLL/PLL accumulators; prompt/noise and PLI power sums (`sumP`, `sumN`, `sumPs`, `sumD`); coherent pilot prompt state (`Cs`, `coh_n`); resampled real/complex code banks and the chip-domain extended-code FFT for L6 CSK detection.
 <br><br>
 
 - `sdr_nav_t`
@@ -195,7 +195,7 @@ This API reference describes the **Pocket SDR** C library (`libsdr`). The librar
 <br><br>
 
 - `sdr_ch_t`
-  - Receiver baseband channel: identifier, code references, carrier/code/Doppler frequencies, lock counts, week/TOW, observation index, plus owned `acq` / `trk` / `nav` substructures.
+  - Receiver baseband channel: identifier, code references, carrier/code/Doppler frequencies, C/N0 and PLI state, Costas and pilot classification flags, lock/loss counts, week/TOW, observation index, plus owned `acq` / `trk` / `nav` substructures.
 <br><br>
 
 - `sdr_buff_t`
@@ -885,7 +885,17 @@ GNSS spreading-code generators and resampling: GPS L1/L2/L5, Galileo E1/E5a/E5b/
 
 **`int sdr_sig_boc(const char *sig)`**
 <br>
-- **Description**: Return BOC modulation order (e.g., 1 for BOC(1,1)) or 0 for BPSK.
+- **Description**: Return 1 for `L1CD`, `L1CP`, `G1OCP`, `G2OCP`, `E1B`, `E1C`, `L1CB`, `B1CD`, `B1CP`, `I1SP`, `I1SD`, or `E5ABQ`; return 0 otherwise. This is a BOC/MBOC-family classification flag, not the BOC order.
+<br><br>
+
+**`int sdr_sig_pilot(const char *sig)`**
+<br>
+- **Description**: Return 1 for `L1CP`, `L5Q`, `L5SQ`, `G2OCP`, `G3OCP`, `E1C`, `E5AQ`, `E5ABQ`, `E5BQ`, `E6C`, `B1CP`, `B2AP`, or `I1SP`; return 0 otherwise. The channel tracker uses this classification to enable coherent prompt accumulation after secondary-code synchronization.
+<br><br>
+
+**`int sdr_code_scale(const char *sig)`**
+<br>
+- **Description**: Return the integer chip-amplitude scale used by the generated spreading code. Returns `SDR_CBOC_SCALE` for multi-level Galileo E1 CBOC codes and 1 for ordinary `-1/0/+1` codes.
 <br><br>
 
 **`void sdr_res_code(const int8_t *code_I, const int8_t *code_Q, int len_code, double T, double coff, double fs, int N, int Nz, sdr_cpx16_t *code_res)`**
@@ -906,7 +916,7 @@ GNSS spreading-code generators and resampling: GPS L1/L2/L5, Galileo E1/E5a/E5b/
 ---
 
 ### Overview
-Per-signal baseband channel: signal acquisition (FFT search → fine Doppler), tracking (3rd-order PLL with Costas, 2nd-order DLL), secondary code sync, and lock counters. The IF data is consumed via `sdr_ch_update()`; correlator state is exposed via `sdr_ch_corr_stat()` / `sdr_ch_corr_hist()`.
+Per-signal baseband channel: FFT acquisition with optional Doppler-assisted extended integration, fine Doppler, third-order PLL (Costas or synchronized-pilot coherent mode), second-order DLL, secondary-code sync, noise-subtracted C/N0/PLI loss detection, and lock counters. The IF data is consumed via `sdr_ch_update()`; correlator state is exposed via `sdr_ch_corr_stat()` / `sdr_ch_corr_hist()`.
 <br>
 
 ### API Functions
@@ -1347,9 +1357,13 @@ Top-level receiver lifecycle and state queries. A receiver wraps a front-end (US
 **`void sdr_rcv_setopt(const char *opt, double value)`**
 <br>
 - **Description**: Set a global library option. Recognized keys are:
-  `epoch`, `lag_epoch`, `el_mask`, `sp_corr`, `t_acq`, `t_dll`, `b_dll`,
-  `b_pll`, `b_fll_w`, `b_fll_n`, `max_dop`, `thres_cn0_l`,
-  `thres_cn0_u`, `thres_pli`, `lost_th`, `bump_jump`, and `max_acq`.
+  `epoch`, `lag_epoch`, `el_mask`, `sp_corr`, `t_acq`, `t_acq_ext`, `t_coh`,
+  `t_dll`, `b_dll`, `b_pll`, `b_fll_w`, `b_fll_n`, `max_dop`,
+  `thres_cn0_l`, `thres_cn0_ext`, `thres_cn0_u`, `thres_pli`, `lost_th`,
+  `bump_jump`, and `max_acq`.
+- **Notes**:
+  - `t_acq_ext` controls assisted-acquisition integration; `t_coh` requests the coherent PLL update interval for synchronized pilot signals; `thres_cn0_ext` is the assisted-acquisition threshold before applying the tracking-loss-plus-1-dB floor.
+  - `t_acq_ext`, `t_coh`, and `thres_cn0_ext` accept only values greater than zero. An invalid or unknown key prints an error and leaves the current value unchanged.
 <br><br>
 
 **`int sdr_rcv_rcv_stat(sdr_rcv_t *rcv, char *buff, int size)`**

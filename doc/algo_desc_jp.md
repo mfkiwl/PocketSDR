@@ -1,7 +1,7 @@
 # **Pocket SDR** GNSS SDR アルゴリズム解説
 
 <div style="text-align: right;">
-<strong>ver.0.18  2026-07-06</strong>
+<strong>ver.0.19  2026-07-20</strong>
 </div>
 
 ---
@@ -552,7 +552,8 @@ IF リングバッファ自体は受信機スレッドが書き込み、受信�
 `N = fs * T`、`T` をコード周期として、`2 * N` サンプルへゼロパディングする。
 ドップラー周波数ビンは、コード周期と設定された最大ドップラー周波数から生成する。
 外部ドップラー周波数支援がある場合、通常のビンリストは、多くの場合、支援された
-ドップラー周波数を中心とする 3 ビンに置き換えられる。
+ドップラー周波数を中心とする 3 ビンに置き換えられる。支援の有無は `fd_ext_valid`
+で明示するため、支援値が厳密に `0 Hz` の場合も有効である。
 
 $$
 f_d \in
@@ -566,9 +567,10 @@ $$
 高速検索支援では、`fd_ext_n` を設定することで、より広い支援窓を要求できる。
 この場合も `fd_ext` の周囲に、要求された数のビンを同じビン間隔で並べる。
 
-受信機は、`n_sum * T >= sdr_t_acq` (既定値は `20 ms`) になるまで、
-ノンコヒーレント相関電力を積算する。その後、ドップラー周波数/コードグリッドから
-最大電力を検索し、ピーク対平均比から C/N0 を推定する。
+通常の信号捕捉では `n_sum * T >= sdr_t_acq` (既定値 `20 ms`)、支援信号捕捉では
+`n_sum * T >= sdr_t_acq_ext` (既定値 `100 ms`) になるまで、ノンコヒーレント相関電力を
+積算する。その後、ドップラー周波数/コードグリッドから最大電力を検索し、ピーク対平均比から
+C/N0 を推定する。
 
 $$
 C/N_0 =
@@ -578,9 +580,19 @@ C/N_0 =
 )
 $$
 
-C/N0推定値がロックしきい値 (`sdr_thres_cn0_l`、既定値は `34 dB-Hz`) を超えれば、
-検出したドップラー周波数とコードオフセットを使って信号追尾を開始する。
-そうでなければ受信機チャネルはアイドル状態に戻る。
+C/N0 推定値が有効なしきい値を超えれば、検出したドップラー周波数とコードオフセットを
+使って信号追尾を開始する。通常の信号捕捉では `sdr_thres_cn0_l` (既定値 `34 dB-Hz`) を
+使う。支援信号捕捉では次式を使い、探索支援により弱信号を捕捉しつつ、信号追尾開始直後の
+ロストを避ける。
+
+$$
+(C/N_0)_{\mathrm{th,assist}} =
+\max\left(sdr\_thres\_cn0\_ext,\;(C/N_0)_{\mathrm{lost}}+1\ \mathrm{dB}\right)
+$$
+
+`sdr_thres_cn0_ext` の既定値は `30 dB-Hz` である。`(C/N0)_lost` は通常信号では
+`sdr_thres_cn0_u`、L6 では専用しきい値を使う。しきい値未満なら受信機チャネルは
+アイドル状態に戻る。
 
 ### 3.4 特殊な信号捕捉ケース
 
@@ -602,6 +614,8 @@ QZSS `L6D` と `L6E` は通常信号と同様に信号捕捉されるが、CSK �
 | `fds` | 通常のドップラー周波数検索ビンリスト |
 | `len_fds` | ドップラー周波数ビン数 |
 | `fd_ext` | オプションの外部ドップラー周波数支援 |
+| `fd_ext_valid` | `fd_ext` が有効であることを示すフラグ |
+| `fd_ext_n` | 支援探索で要求するドップラー周波数ビン数 |
 | `P_sum` | 相関電力のノンコヒーレント和 |
 | `n_sum` | 積算済みのコヒーレントなコード周期検索回数 |
 
@@ -648,7 +662,8 @@ $$
 
 `sdr_search_code()` の各呼び出しは、全ドップラー周波数ビンについて 1 コード周期分の
 コヒーレント相関を実行する。コヒーレント結果は電力へ変換され、`P_sum` に積算される。
-十分な回数呼ばれると、ノンコヒーレント積分時間が `sdr_t_acq` に到達する。
+十分な回数呼ばれると、ノンコヒーレント積分時間が通常探索では `sdr_t_acq`、
+支援探索では `sdr_t_acq_ext` に到達する。
 
 両者の違いは以下のとおりである。
 
@@ -676,9 +691,10 @@ $$
 変換する。これは完全な統計的 CFAR 検出器ではない。受信機の信号追尾しきい値と
 ステータス表示に合う、実用的な信号捕捉メトリクスである。
 
-信号捕捉判定には 2 つの出力がある。
+信号捕捉判定には 2 つの出力がある。有効なしきい値は、通常探索では
+`sdr_thres_cn0_l`、支援探索では 3.3 節の支援信号捕捉しきい値である。
 
-- `cn0 >= sdr_thres_cn0_l` なら、受信機チャネルは信号追尾を開始する。
+- `cn0 >=` 有効なしきい値なら、受信機チャネルは信号追尾を開始する。
 - それ以外なら、受信機チャネルは短時間スリープし、アイドル状態に戻り、後でスケジューラに
   よって再検索され得る。
 
@@ -709,7 +725,8 @@ $$
 実装されている 1 受信機チャネル分の信号捕捉ループは、以下のように表せる。
 
 ```text
-if external doppler aid is available:
+assisted = fd_ext_valid
+if assisted:
     if fd_ext_n is set:
         fds = fd_ext-centered bins with fd_ext_n entries at 0.5/T spacing
     else:
@@ -723,7 +740,11 @@ if P_sum is not allocated:
 sdr_search_code(code_fft, T, buffer, ix, 2N, fs, fi, fds, P_sum)
 n_sum += 1
 
-if n_sum * T >= sdr_t_acq:
+T_acq = sdr_t_acq_ext if assisted else sdr_t_acq
+threshold = max(sdr_thres_cn0_ext, lost_threshold + 1) if assisted
+            else sdr_thres_cn0_l
+
+if n_sum * T >= T_acq:
     cn0, fd_index, code_index = peak_search(P_sum)
     if cn0 >= threshold:
         fd = fine_doppler(P_sum, fd_index)
@@ -844,12 +865,15 @@ $$
 - IF サンプルを現在の搬送波レプリカでミキシングする。
 - prompt 相関値を prompt 履歴バッファへ保存する。
 
-搬送波信号追尾は、周波数引き込み用 FLL の後に PLL を使う。
+搬送波信号追尾は、周波数引き込み用 FLL の後に PLL を使う。通常はコード周期ごとの
+prompt 相関値を PLL に入力する。対応するパイロット信号では、セカンダリコード同期後に
+prompt を `sdr_t_coh` (既定値 `20 ms`) までコヒーレント積算してから PLL を更新する。
 
 最初の `T_FPULLIN = 1.0 s` では、FLL 弁別器が現在と前回の prompt 相関値を
 dot 積と cross 積で比較する。最初はワイドバンドFLLを使い、その後ナローバンドFLLを使う。
 周波数引き込み後は 3 次 PLL を使う。データ信号では搬送波弁別器は Costas 形式であり、
-非 Costas の場合は完全な `atan2` 位相を使う。
+非 Costas の場合は完全な `atan2` 位相を使う。コヒーレント積算を使うパイロット信号も
+4 象限の `atan2` 位相を使う。
 
 ### 4.4 コード信号追尾
 
@@ -877,17 +901,18 @@ $$
 相関器出力からセカンダリコード極性を取り除く。セカンダリコード境界で平均 prompt
 振幅が信号ロストしきい値を下回ると、セカンダリコード同期を解除する。
 
-C/N0 は、`T_CN0 = 0.5 s` ごとに prompt 電力と noise 相関器から推定する。
+C/N0 は、`T_CN0 = 0.5 s` ごとに prompt 電力と noise 相関器から推定する。prompt 電力から
+noise 相関器電力を差し引き、信号電力を分離する。
 
 $$
-C/N_0 =
-10\log_{10}
-(
-\frac{P_{\mathrm{prompt}}}{P_{\mathrm{noise}}\,T}
-)
+\begin{aligned}
+P_S &= \max(P_{\mathrm{prompt}}-P_{\mathrm{noise}},\;0.01P_{\mathrm{noise}}) \\
+C/N_0 &= 10\log_{10}\left(\frac{P_S}{P_{\mathrm{noise}}T}\right)
+\end{aligned}
 $$
 
-推定値にはローパスフィルタをかける。
+`0.01P_noise` は対数を有限に保つための下限であり、弱信号時に noise 電力そのものを
+信号電力として数えることを避ける。推定値にはローパスフィルタをかける。
 
 同じ `T_CN0` 境界で、受信機は搬送波ロック指標 (PLI) も更新する。これは受信電力に
 依存しない squaring (Van Dierendonck) 検出器であり、prompt 電力が高いまま搬送波の
@@ -895,16 +920,19 @@ $$
 
 $$
 \mathrm{PLI} =
-\frac{\sum (I_P^2 - Q_P^2)}{\sum (I_P^2 + Q_P^2)}
+\frac{\mathrm{sumD}}{\mathrm{sumPs}} =
+\frac{\sum (I_P^2-Q_P^2)}{\sum (I_P^2+Q_P^2)}
 \approx \cos 2\bar{\phi}
 $$
 
 PLI は、位相ロック中は `+1` に近づき、搬送波が回転している場合や雑音だけの場合は
 `0` に近づく。Costas 信号追尾の信号についてのみ計算され、最初の `T_CN0` 窓の後に
-有効になる。
+有効になる。通常はコード周期ごとの prompt を使い、パイロットのコヒーレント PLL では
+PLL と同じコヒーレント積算区間の prompt を使う。したがって `sumD` と `sumPs` は常に
+同じ積算区間の分子と prompt 電力を保持する。
 
 信号ロストは、エポックごとではなく `T_CN0` 窓ごとに判定する。フィルタ済み C/N0 が
-信号ロストしきい値 (`sdr_thres_cn0_u`、通常は `30 dB-Hz`、L6 では `33 dB-Hz`) を
+信号ロストしきい値 (`sdr_thres_cn0_u`、通常は `25 dB-Hz`、L6 では `32.5 dB-Hz`) を
 下回る、または Costas 信号追尾信号の PLI が `sdr_thres_pli` を下回ると、その窓を
 bad と判定する。悲観的なカウンタで過渡現象をデバウンスし、`sdr_lost_th` 個の bad 窓が
 連続した場合にだけ、受信機チャネルは信号ロストを宣言してアイドル状態に戻り、再信号捕捉の
@@ -933,7 +961,8 @@ prompt 電力と比較する。片側がサイドピークロックを示して�
 | `err_phas`, `phas_acc` | PLL 弁別器履歴と 3 次アキュムレータ |
 | `err_code`, `code_int` | DLL 弁別器履歴と 2 次積分器 |
 | `sumP`, `sumN` | C/N0 用の prompt 電力和と noise 電力和 |
-| `sumD` | 搬送波ロック指標 (PLI) 用の prompt `I^2-Q^2` 和 |
+| `sumPs`, `sumD` | PLI 用の prompt 電力和と prompt `I^2-Q^2` 和 |
+| `Cs`, `coh_n` | パイロット PLL 用のコヒーレント prompt 和と積算数 |
 | `sumC[]`, `sumI[]` | DLL 積算バッファ |
 | `code` | リサンプリング済み信号追尾コードバンク |
 | `code_fft` | L6 CSK 検出用のチップ領域周期延長コード FFT |
@@ -943,7 +972,7 @@ prompt 電力と比較する。片側がサイドピークロックを示して�
 格納する。具体的には、ドップラー周波数、コードオフセット、連続搬送波位相 (`phi`)、
 積算ドップラー周波数レンジ、C/N0、搬送波ロック指標 (`pli`) とその valid flag、
 週番号/TOW、ロック数、信号ロスト数、信号ロスト判定カウンタ (`lost_cnt`)、Costas/non-Costas モード、
-航法データ状態である。
+パイロット信号分類、航法データ状態である。
 
 `start_track()` は、動的な信号追尾状態と航法データ状態をリセットする。
 コードや FFT は恒久的な受信機チャネルリソースなので再生成しない。これにより、
@@ -1092,15 +1121,31 @@ e_{\phi} =
 \end{cases}
 $$
 
-実装は、ソース内で定数が文書化された 3 次ループを使う。
+実装は、ソース内で定数が文書化された 3 次ループを使う。以下の `\Delta t` は PLL の
+実際の更新間隔であり、通常は `T`、コヒーレント積算時は `K T` である。
 
 $$
 \begin{aligned}
 W &= \frac{B_{\mathrm{PLL}}}{0.7845} \\
-a_{\phi} &\leftarrow a_{\phi} + W^3 e_{\phi} T \\
-f_d &\leftarrow f_d + 2.4W(e_{\phi}-e_{\phi,\mathrm{prev}}) + 1.1W^2 e_{\phi}T + a_{\phi}T
+a_{\phi} &\leftarrow a_{\phi} + W^3 e_{\phi}\Delta t \\
+f_d &\leftarrow f_d + 2.4W(e_{\phi}-e_{\phi,\mathrm{prev}}) + 1.1W^2 e_{\phi}\Delta t + a_{\phi}\Delta t
 \end{aligned}
 $$
+
+対応するパイロット信号では、セカンダリコード同期後に
+`K = max(1, round(sdr_t_coh/T))` 周期分の極性補正済み prompt を加算する。
+
+$$
+C_S=\sum_{k=0}^{K-1} C_P[k],\qquad
+e_\phi=\frac{\mathrm{atan2}(\Im C_S,\Re C_S)}{2\pi},\qquad
+\Delta t=KT
+$$
+
+対象は `L1CP`, `L5Q`, `L5SQ`, `G2OCP`, `G3OCP`, `E1C`, `E5AQ`, `E5ABQ`, `E5BQ`,
+`E6C`, `B1CP`, `B2AP`, `I1SP` である。セカンダリコード同期が失われた場合、または
+`sdr_b_pll K T >= 0.4` となり設定帯域に対して更新間隔が長すぎる場合は、コード周期ごとの
+Costas PLL へ戻る。`sec_pol` は半周期境界でも正しい極性を表すため、複数周期加算時にも
+セカンダリコード反転を除去できる。
 
 3 次ループは、単純な 1 次または 2 次ループよりも、搬送波位相の一定加速度をよく
 追従できる。これは、発振器ドリフト、受信機運動、衛星ダイナミクスを持つライブ
@@ -1144,9 +1189,10 @@ DLL の更新間隔は、搬送波更新間隔より長い。コード信号追�
 
 ### 4.15 ロック、信号ロスト、しきい値
 
-受信機には、意味の異なる 2 つの C/N0 しきい値がある。
+受信機には、意味の異なる 3 つの設定可能な C/N0 しきい値がある。
 
 - `sdr_thres_cn0_l` は、信号捕捉後にロックを開始するために使う。
+- `sdr_thres_cn0_ext` は、支援信号捕捉のロック開始しきい値の下限に使う。
 - `sdr_thres_cn0_u` は、信号追尾中に信号ロストを宣言するために使う。
 
 信号ロストしきい値は信号捕捉しきい値より低い。これは意図的なヒステリシスである。
@@ -1245,11 +1291,14 @@ if sec_code can be synchronized:
 
 if inside pull-in time:
     run FLL
+else if supported pilot, sec_code synchronized, and b_pll * K * T < 0.4:
+    coherently sum K = max(1, round(sdr_t_coh / T)) prompt values
+    run non-Costas PLL with dt = K * T
 else:
-    run PLL
+    run per-period PLL
 
 run DLL
-update C/N0
+update noise-subtracted C/N0 and interval-matched PLI
 
 if nav pull-in reached:
     decode nav data
@@ -2064,6 +2113,8 @@ prompt/early/late と追加相関器出力を公開する。
 | `SDR_N_HIST` | `5000` | prompt 履歴長 |
 | `SP_CORR` | `0.25 chip` | early/late 相関器間隔 |
 | `T_ACQ` | `20 ms` | 信号捕捉のノンコヒーレント積分時間 |
+| `T_ACQ_EXT` | `100 ms` | 支援信号捕捉のノンコヒーレント積分時間 |
+| `T_COH` | `20 ms` | 同期済みパイロット PLL の目標コヒーレント積分時間 |
 | `T_DLL` | `20 ms` | DLL ノンコヒーレント積分時間 |
 | `T_CN0` | `0.5 s` | C/N0 平均化間隔 |
 | `T_FPULLIN` | `1.0 s` | PLL 前の FLL プルイン時間 |
@@ -2074,7 +2125,9 @@ prompt/early/late と追加相関器出力を公開する。
 | `B_FLL_N` | `2.0 Hz` | 狭帯域 FLL 雑音帯域幅 |
 | `MAX_DOP` | `5000 Hz` | 既定の信号捕捉ドップラー周波数検索上限 |
 | `THRES_CN0_L` | `34 dB-Hz` | 信号捕捉ロックしきい値 |
-| `THRES_CN0_U` | `30 dB-Hz` | 信号追尾信号ロストしきい値 |
+| `THRES_CN0_EXT` | `30 dB-Hz` | 支援信号捕捉ロックしきい値の下限 |
+| `THRES_CN0_U` | `25 dB-Hz` | 通常信号の信号追尾ロストしきい値 |
+| `THRES_CN0_L6` | `32.5 dB-Hz` | L6 信号の信号追尾ロストしきい値 |
 
 これらの値は、ホスト上で動くソフトウェア受信機向けに調整されている。感度、CPU 負荷、
 レイテンシ、ロバスト性のバランスを取っている。信号捕捉積分時間を増やすと、弱信号検出は
@@ -2437,16 +2490,17 @@ $$
 $$
 
 信号追尾では、受信機は prompt 相関器と、意図的に離したノイズ相関器を持つ。
-prompt/ノイズ電力比を 0.5 s にわたって積算する。
+prompt 電力からノイズ電力を差し引いた信号電力とノイズ電力を 0.5 s にわたって積算する。
 
 $$
 (C/N_0)_{\mathrm{trk}} =
 10\log_{10}
-(
-\frac{\sum |P|^2}{T\sum |N|^2}
-)
+\left(\frac{\max(\sum |P|^2-\sum |N|^2,\;0.01\sum |N|^2)}
+{T\sum |N|^2}\right)
 $$
 
+`0.01` の下限は、雑音だけの場合にも対数を有限に保つ数値保護である。旧来の
+prompt/ノイズ電力比をそのまま信号電力とする式と異なり、低 C/N0 での正のバイアスを抑える。
 どちらも実用的な受信機メトリクスである。同一の推定器ではないので、ロック遷移時に
 厳密に一致するとは期待すべきでない。信号捕捉メトリクスは検出に使い、
 信号追尾メトリクスはステータスと信号ロスト検出に使う。

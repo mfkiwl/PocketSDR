@@ -6,6 +6,8 @@
 #define SQR(x) ((x) * (x))
 
 extern double sdr_t_acq;
+extern double sdr_t_acq_ext;
+extern double sdr_t_coh;
 
 // pack signed I/Q values into sdr_cpx8_t --------------------------------------
 static sdr_cpx8_t pack_cpx8(int re, int im)
@@ -46,6 +48,7 @@ static void test_sdr_ch_new_free_api(void)
     TEST_ASSERT_TRUE(ch->data != NULL);
     TEST_ASSERT_EQ_INT(4, ch->trk->npos);
     TEST_ASSERT_EQ_INT(0, ch->trk->nposx);
+    TEST_ASSERT_EQ_INT(0, ch->pilot);
     sdr_ch_free(ch);
     
     ch = sdr_ch_new("l1ca", 1, 4e6, 0.0);
@@ -196,6 +199,33 @@ static void test_sdr_ch_update_search_api(void)
     sdr_ch_free(ch);
 }
 
+// test sdr_ch_update() in assisted SEARCH state -------------------------------
+static void test_sdr_ch_update_assisted_search_api(void)
+{
+    sdr_ch_t *ch = sdr_ch_new("L1CA", 1, 4e6, 0.0);
+    sdr_buff_t *buff;
+    double old_t_acq_ext = sdr_t_acq_ext;
+
+    TEST_ASSERT_TRUE(ch != NULL);
+    buff = new_zero_buff(ch->N * 2);
+
+    sdr_t_acq_ext = ch->T;
+    ch->acq->fd_ext = 0.0f;
+    ch->acq->fd_ext_valid = 1;
+    ch->state = SDR_STATE_SRCH;
+    sdr_ch_update(ch, 1.0, buff, 0);
+
+    TEST_ASSERT_EQ_INT(SDR_STATE_IDLE, ch->state);
+    TEST_ASSERT_EQ_INT(0, ch->acq->n_sum);
+    TEST_ASSERT_TRUE(ch->acq->P_sum == NULL);
+    TEST_ASSERT_NEAR(0.0, ch->acq->fd_ext, 1e-6);
+    TEST_ASSERT_EQ_INT(0, ch->acq->fd_ext_valid);
+
+    sdr_t_acq_ext = old_t_acq_ext;
+    sdr_buff_free(buff);
+    sdr_ch_free(ch);
+}
+
 // test sdr_ch_update() in LOCK state ------------------------------------------
 static void test_sdr_ch_update_lock_api(void)
 {
@@ -219,6 +249,35 @@ static void test_sdr_ch_update_lock_api(void)
     TEST_ASSERT_TRUE(isfinite(ch->fd));
     TEST_ASSERT_TRUE(isfinite(ch->coff));
     
+    sdr_buff_free(buff);
+    sdr_ch_free(ch);
+}
+
+// test coherent prompt accumulation for a synchronized pilot -----------------
+static void test_sdr_ch_update_pilot_coherent_api(void)
+{
+    sdr_ch_t *ch = sdr_ch_new("L5Q", 1, 4e6, 0.0);
+    sdr_buff_t *buff;
+    double old_t_coh = sdr_t_coh;
+
+    TEST_ASSERT_TRUE(ch != NULL);
+    TEST_ASSERT_EQ_INT(1, ch->pilot);
+    buff = new_zero_buff(ch->N * 2);
+
+    sdr_t_coh = 0.02;
+    ch->state = SDR_STATE_LOCK;
+    ch->time = 2.001;
+    ch->lock = 2001;
+    ch->cn0 = 45.0;
+    ch->trk->sec_sync = 2000;
+    ch->trk->sec_pol = 1;
+
+    sdr_ch_update(ch, ch->time + ch->T, buff, 0);
+
+    TEST_ASSERT_EQ_INT(1, ch->trk->coh_n);
+    TEST_ASSERT_TRUE(isfinite(ch->fd));
+
+    sdr_t_coh = old_t_coh;
     sdr_buff_free(buff);
     sdr_ch_free(ch);
 }
@@ -303,7 +362,9 @@ int main(void)
     TEST_RUN(test_sdr_ch_corr_hist_api);
     TEST_RUN(test_sdr_ch_update_idle_api);
     TEST_RUN(test_sdr_ch_update_search_api);
+    TEST_RUN(test_sdr_ch_update_assisted_search_api);
     TEST_RUN(test_sdr_ch_update_lock_api);
+    TEST_RUN(test_sdr_ch_update_pilot_coherent_api);
     TEST_RUN(test_sdr_ch_update_l6_csk);
 
     return 0;

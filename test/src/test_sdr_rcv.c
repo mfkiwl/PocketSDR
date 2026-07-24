@@ -8,6 +8,9 @@
 
 extern double sdr_epoch;
 extern double sdr_t_acq;
+extern double sdr_t_acq_ext;
+extern double sdr_t_coh;
+extern double sdr_thres_cn0_ext;
 extern double sdr_max_acq;
 extern int sdr_bump_jump;
 
@@ -175,22 +178,32 @@ static void test_sdr_rcv_open_close_api(void)
 static void test_sdr_rcv_setopt_api(void)
 {
     double epoch0 = sdr_epoch;
-    double t_acq0 = sdr_t_acq;
+    double t_acq0 = sdr_t_acq, t_acq_ext0 = sdr_t_acq_ext;
+    double t_coh0 = sdr_t_coh, thres_cn0_ext0 = sdr_thres_cn0_ext;
     double max_acq0 = sdr_max_acq;
     int bump_jump0 = sdr_bump_jump;
     
     sdr_rcv_setopt("epoch", 0.2);
     sdr_rcv_setopt("t_acq", 0.04);
+    sdr_rcv_setopt("t_acq_ext", 0.12);
+    sdr_rcv_setopt("t_coh", 0.03);
+    sdr_rcv_setopt("thres_cn0_ext", 29.0);
     sdr_rcv_setopt("max_acq", 7.0);
     sdr_rcv_setopt("bump_jump", 1.0);
     TEST_ASSERT_NEAR(0.2, sdr_epoch, 1e-12);
     TEST_ASSERT_NEAR(0.04, sdr_t_acq, 1e-12);
+    TEST_ASSERT_NEAR(0.12, sdr_t_acq_ext, 1e-12);
+    TEST_ASSERT_NEAR(0.03, sdr_t_coh, 1e-12);
+    TEST_ASSERT_NEAR(29.0, sdr_thres_cn0_ext, 1e-12);
     TEST_ASSERT_NEAR(7.0, sdr_max_acq, 1e-12);
     TEST_ASSERT_EQ_INT(1, sdr_bump_jump);
     
     sdr_rcv_setopt("unknown_option", 123.0);
     sdr_rcv_setopt("epoch", epoch0);
     sdr_rcv_setopt("t_acq", t_acq0);
+    sdr_rcv_setopt("t_acq_ext", t_acq_ext0);
+    sdr_rcv_setopt("t_coh", t_coh0);
+    sdr_rcv_setopt("thres_cn0_ext", thres_cn0_ext0);
     sdr_rcv_setopt("max_acq", max_acq0);
     sdr_rcv_setopt("bump_jump", bump_jump0);
 }

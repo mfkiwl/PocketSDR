@@ -7,6 +7,7 @@
 #  History:
 #  2024-06-10  1.0  new
 #  2024-12-30  1.1  update input options, output options, system options
+#  2026-07-19  1.2  add low-C/N0 acquisition and tracking options
 #
 import os, webbrowser, subprocess
 from tkinter import *
@@ -277,6 +278,8 @@ def sys_opt_new(opt_p=None):
     opt.acq_mode = StringVar()
     opt.sp_corr = StringVar()
     opt.t_acq = StringVar()
+    opt.t_acq_ext = StringVar()
+    opt.t_coh = StringVar()
     opt.t_dll = StringVar()
     opt.b_dll = StringVar()
     opt.b_pll = StringVar()
@@ -284,6 +287,7 @@ def sys_opt_new(opt_p=None):
     opt.b_fll_n = StringVar()
     opt.max_dop = StringVar()
     opt.thres_cn0_l = StringVar()
+    opt.thres_cn0_ext = StringVar()
     opt.thres_cn0_u = StringVar()
     opt.thres_pli = StringVar()
     opt.lost_th = StringVar()
@@ -298,6 +302,8 @@ def sys_opt_new(opt_p=None):
         opt.acq_mode.set(opt_p.acq_mode.get())
         opt.sp_corr.set(opt_p.sp_corr.get())
         opt.t_acq.set(opt_p.t_acq.get())
+        opt.t_acq_ext.set(opt_p.t_acq_ext.get())
+        opt.t_coh.set(opt_p.t_coh.get())
         opt.t_dll.set(opt_p.t_dll.get())
         opt.b_dll.set(opt_p.b_dll.get())
         opt.b_pll.set(opt_p.b_pll.get())
@@ -305,6 +311,7 @@ def sys_opt_new(opt_p=None):
         opt.b_fll_n.set(opt_p.b_fll_n.get())
         opt.max_dop.set(opt_p.max_dop.get())
         opt.thres_cn0_l.set(opt_p.thres_cn0_l.get())
+        opt.thres_cn0_ext.set(opt_p.thres_cn0_ext.get())
         opt.thres_cn0_u.set(opt_p.thres_cn0_u.get())
         opt.thres_pli.set(opt_p.thres_pli.get())
         opt.lost_th.set(opt_p.lost_th.get())
@@ -316,9 +323,11 @@ def sys_opt_new(opt_p=None):
         opt.epoch.set('1.0')
         opt.lag_epoch.set('0.8')
         opt.el_mask.set('15')
-        opt.acq_mode.set('Full-Search')
+        opt.acq_mode.set('Full')
         opt.sp_corr.set('0.25')
         opt.t_acq.set('0.02')
+        opt.t_acq_ext.set('0.1')
+        opt.t_coh.set('0.02')
         opt.t_dll.set('0.02')
         opt.b_dll.set('0.5')
         opt.b_pll.set('10.0')
@@ -326,7 +335,8 @@ def sys_opt_new(opt_p=None):
         opt.b_fll_n.set('5.0')
         opt.max_dop.set('5000')
         opt.thres_cn0_l.set('34.0')
-        opt.thres_cn0_u.set('30.0')
+        opt.thres_cn0_ext.set('30.0')
+        opt.thres_cn0_u.set('25.0')
         opt.thres_pli.set('0.25')
         opt.lost_th.set('4')
         opt.bump_jump.set('OFF')
@@ -691,60 +701,69 @@ def sig_opt_set_all(panels, opt, state):
 def sys_opt_dlg(root, opt):
     labels = ('Epoch Interval for PVT (s)', 'Max Epoch Lag for PVT (s)',
         'Elevation Mask for PVT (\xb0)', 'Correlator Spacing (chip)',
-        'Integration Time for Acquisition (s)', 'Integration Time for DLL (s)',
-        'DLL Loop Filter Bandwidth (Hz)', 'PLL Loop Filter Bandwidth (Hz)',
-        'FLL Loop Filter Bandwidth Wide (Hz)',
-        'FLL Loop Filter Bandwidth Narrow (Hz)',
-        'Max Doppler Freq. to Search Signal (Hz)',
-        'C/N0 Threshold for Signal Locked (dB-Hz)',
-        'C/N0 Threshold for Signal Lost (dB-Hz)', 'Bump Jump for BOC Modulation',
-        'Signal Acquisition Mode',
-        'Max Code Length for direct acquisition (ms)',
-        'Carrier Lock Threshold (PLI)', 'Lost Decision Count (windows)')
+        'Integration for Acquisition (s)', 'Integration for Assisted Acq (s)',
+        'Integration for DLL (s)', 'Coherent Integration for Pilot (s)',
+        'DLL Loop Filter BW (Hz)', 'PLL Loop Filter BW (Hz)',
+        'FLL Loop Filter BW Wide (Hz)', 'FLL Loop Filter BW Narrow (Hz)',
+        'Max Doppler Freq to Search (Hz)', 'C/N0 Thres for Lock (dB-Hz)',
+        'C/N0 Thres for Assisted Acq (dB-Hz)', 'C/N0 Thres for Lost (dB-Hz)',
+        'Bump Jump for BOC Modulation', 'Signal Acquisition Mode',
+        'Max Code Len for Direct Acq (ms)', 'Carrier Lock Threshold (PLI)',
+        'Lost Decision Count (windows)')
     opt_new = sys_opt_new(opt)
-    dlg = modal_dlg_new(root, 420, 640, 'System Options')
+    dlg = modal_dlg_new(root, 660, 500, 'System Options')
     ttk.Button(dlg.btns, width=12, padding=(2, 2), text='Set Default',
         command=lambda: sys_opt_set_default(opt_new)).pack(side=LEFT, padx=1)
     panel1 = Frame(dlg.panel, bg=BG_COLOR, relief=GROOVE, borderwidth=2)
     panel1.pack(fill=X, pady=2, ipady=1)
-    sel_panel_new(panel1, labels[0], sels=('0.1', '0.2', '0.5', '1.0',
-        '2.0', '5.0'), var=opt_new.epoch, width=10)
-    sel_panel_new(panel1, labels[1], sels=('0.1', '0.2', '0.3', '0.5', '0.75',
-        '1.0'), var=opt_new.lag_epoch, width=10)
-    sel_panel_new(panel1, labels[2], sels=('5', '10', '15', '20', '25',
-        '30'), var=opt_new.el_mask, width=10)
+    sel_panel_new(panel1, labels[0], sels=('0.1', '0.2', '0.5', '1.0', '2.0',
+        '5.0'), var=opt_new.epoch, width=7)
+    sel_panel_new(panel1, labels[1], sels=('0.1', '0.2', '0.5', '1.0', '2.0'),
+        var=opt_new.lag_epoch, width=7)
+    sel_panel_new(panel1, labels[2], sels=('5', '10', '15', '20', '25', '30'),
+        var=opt_new.el_mask, width=7)
     panel2 = Frame(dlg.panel, bg=BG_COLOR, relief=GROOVE, borderwidth=2)
     panel2.pack(fill=X, pady=2, ipady=1)
-    sel_panel_new(panel2, labels[3], sels=('0.05', '0.1', '0.15', '0.2', '0.25',
-        '0.5', '0.75', '1.0'), var=opt_new.sp_corr, width=10)
-    sel_panel_new(panel2, labels[4], sels=('0.005', '0.01', '0.02', '0.05',
-        '0.1', '0.2'), var=opt_new.t_acq, width=10)
-    sel_panel_new(panel2, labels[5], sels=('0.005', '0.01', '0.02', '0.05',
-        '0.1', '0.2'), var=opt_new.t_dll, width=10)
-    sel_panel_new(panel2, labels[6], sels=('0.1', '0.15', '0.2', '0.25',
-        '0.3', '0.4', '0.5', '0.75', '1.0'), var=opt_new.b_dll, width=10)
-    sel_panel_new(panel2, labels[7], sels=('1.0', '2.5', '5.0', '7.5', '10.0',
-        '15.0', '20.0'), var=opt_new.b_pll, width=10)
-    sel_panel_new(panel2, labels[8], sels=('1.0', '2.5', '5.0', '7.5', '10.0',
-        '15.0', '20.0'), var=opt_new.b_fll_w, width=10)
-    sel_panel_new(panel2, labels[9], sels=('0.5', '1.0', '2.0', '3.0', '4.0',
-        '5.0', '6.0'), var=opt_new.b_fll_n, width=10)
-    sel_panel_new(panel2, labels[10], sels=('3000', '5000', '7000', '10000',
-        '15000', '20000'), var=opt_new.max_dop, width=10)
-    sel_panel_new(panel2, labels[11], sels=('31.0', '32.0', '33.0', '34.0',
-        '35.0', '36.0', '37.0'), var=opt_new.thres_cn0_l, width=10)
-    sel_panel_new(panel2, labels[12], sels=('27.0', '28.0', '29.0', '30.0',
-        '31.0', '32.0', '33.0'), var=opt_new.thres_cn0_u, width=10)
-    sel_panel_new(panel2, labels[16], sels=('0.1', '0.15', '0.2', '0.25',
-        '0.3', '0.35', '0.4'), var=opt_new.thres_pli, width=10)
-    sel_panel_new(panel2, labels[17], sels=('1', '2', '3', '4', '5', '6'),
-        var=opt_new.lost_th, width=10)
-    sel_panel_new(panel2, labels[13], sels=('OFF', 'ON'), var=opt_new.bump_jump,
-        width=10)
-    sel_panel_new(panel2, labels[14], sels=('Full-Search', 'Fast-Search'),
-        var=opt_new.acq_mode, width=10)
-    sel_panel_new(panel2, labels[15], sels=('1.0', '2.0', '5.0', '10.0', '20.0'),
-        var=opt_new.max_acq, width=10)
+    panel2a = Frame(panel2, bg=BG_COLOR)
+    panel2a.pack(side=LEFT, expand=1, fill=BOTH)
+    panel2b = Frame(panel2, bg=BG_COLOR)
+    panel2b.pack(side=LEFT, expand=1, fill=BOTH)
+    sel_panel_new(panel2a, labels[3], sels=('0.05', '0.1', '0.15', '0.2', '0.25',
+        '0.5', '0.75', '1.0'), var=opt_new.sp_corr, width=7)
+    sel_panel_new(panel2a, labels[4], sels=('0.01', '0.02', '0.05', '0.1', '0.2'),
+        var=opt_new.t_acq, width=7)
+    sel_panel_new(panel2a, labels[5], sels=('0.01', '0.02', '0.05', '0.1', '0.2'),
+        var=opt_new.t_acq_ext, width=7)
+    sel_panel_new(panel2a, labels[6], sels=('0.005', '0.01', '0.02', '0.05',
+        '0.1', '0.2'), var=opt_new.t_dll, width=7)
+    sel_panel_new(panel2a, labels[7], sels=('0.005', '0.01', '0.02', '0.05',
+        '0.1', '0.2'), var=opt_new.t_coh, width=7)
+    sel_panel_new(panel2a, labels[8], sels=('0.1', '0.2', '0.3', '0.4', '0.5',
+        '0.75', '1.0'), var=opt_new.b_dll, width=7)
+    sel_panel_new(panel2a, labels[9], sels=('1.0', '2.5', '5.0', '7.5', '10.0',
+        '15.0', '20.0'), var=opt_new.b_pll, width=7)
+    sel_panel_new(panel2a, labels[10], sels=('1.0', '2.5', '5.0', '7.5', '10.0',
+        '15.0', '20.0'), var=opt_new.b_fll_w, width=7)
+    sel_panel_new(panel2a, labels[11], sels=('1.0', '2.5', '5.0', '7.5', '10.0',
+        '15.0', '20.0'), var=opt_new.b_fll_n, width=7)
+    sel_panel_new(panel2b, labels[12], sels=('3000', '5000', '7000', '10000',
+        '15000', '20000'), var=opt_new.max_dop, width=7)
+    sel_panel_new(panel2b, labels[13], sels=('30.0', '31.0', '32.0', '33.0',
+        '34.0', '35.0', '36.0'), var=opt_new.thres_cn0_l, width=7)
+    sel_panel_new(panel2b, labels[14], sels=('25.0', '26.0', '27.0', '28.0',
+        '29.0', '30.0', '31.0', '32.0'), var=opt_new.thres_cn0_ext, width=7)
+    sel_panel_new(panel2b, labels[15], sels=('18.0', '19.0', '20.0', '21.0', '22.0',
+        '23.0', '24.0', '25.0', '27.0', '30.0'), var=opt_new.thres_cn0_u, width=7)
+    sel_panel_new(panel2b, labels[19], sels=('0.1', '0.15', '0.2', '0.25',
+        '0.3', '0.35', '0.4'), var=opt_new.thres_pli, width=7)
+    sel_panel_new(panel2b, labels[20], sels=('1', '2', '3', '4', '5', '6'),
+        var=opt_new.lost_th, width=7)
+    sel_panel_new(panel2b, labels[16], sels=('OFF', 'ON'), var=opt_new.bump_jump,
+        width=7)
+    sel_panel_new(panel2b, labels[17], sels=('Full', 'Fast'),
+        var=opt_new.acq_mode, width=7)
+    sel_panel_new(panel2b, labels[18], sels=('1.0', '2.0', '5.0', '10.0', '20.0'),
+        var=opt_new.max_acq, width=7)
     path_panel_new(dlg.panel, 'FFTW Wisdom Path', out=0,
         var_path=opt_new.fftw_wisdom_path)
     ttk.Label(dlg.panel, text='Receiver Options').pack(fill=X, padx=10, pady=4)

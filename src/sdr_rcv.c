@@ -18,6 +18,7 @@
 //                   modify API sdr_rcv_open_dev(), sdr_rcv_open_file()
 //  2025-01-17  1.9  delete RINEX output by -OUTRNX option
 //  2025-11-16  1.10 support alternative RF frontends
+//  2026-07-19  1.11 add low-C/N0 acquisition and tracking options
 //
 #include "pocket_sdr.h"
 
@@ -942,9 +943,11 @@ static int re_acq(sdr_rcv_t *rcv, sdr_ch_t *ch)
     if (ch->lock * ch->T < MIN_LOCK) return 0;
     if (get_buff_ix(rcv) * SDR_CYC < ch->time + TO_REACQ) {
         ch->acq->fd_ext = (float)ch->fd;
+        ch->acq->fd_ext_valid = 1;
         return 1;
     }
     ch->acq->fd_ext = 0.0; // re-acquisition timeout
+    ch->acq->fd_ext_valid = 0;
     return 0;
 }
 
@@ -956,6 +959,7 @@ static int assist_acq(sdr_rcv_t *rcv, sdr_ch_t *ch)
         if (strcmp(ch->sat, ch_i->sat) || ch_i->state != SDR_STATE_LOCK ||
             ch_i->lock * ch_i->T < MIN_LOCK) continue;
         ch->acq->fd_ext = (float)(ch_i->fd * ch->fc / ch_i->fc);
+        ch->acq->fd_ext_valid = 1;
         return 1;
     }
     return 0;
@@ -1080,6 +1084,7 @@ static int fast_acq(sdr_rcv_t *rcv, sdr_ch_t *ch)
         }
         if (best_el < -PI / 2.0) return 0; // fallback to normal search
         ch->acq->fd_ext = (float)best_fd;
+        ch->acq->fd_ext_valid = 1;
         return 1;
     }
     // compute satellite position at t and t+0.5s for range-rate
@@ -1127,6 +1132,7 @@ static int fast_acq(sdr_rcv_t *rcv, sdr_ch_t *ch)
     }
     // set wide search window centred on predicted Doppler
     ch->acq->fd_ext = (float)fd;
+    ch->acq->fd_ext_valid = 1;
     return 1;
 }
 
@@ -1883,6 +1889,7 @@ void sdr_rcv_close(sdr_rcv_t *rcv)
 void sdr_rcv_setopt(const char *opt, double value)
 {
     extern double sdr_epoch, sdr_lag_epoch, sdr_el_mask, sdr_sp_corr, sdr_t_acq;
+    extern double sdr_t_acq_ext, sdr_t_coh, sdr_thres_cn0_ext;
     extern double sdr_t_dll, sdr_b_dll, sdr_b_pll, sdr_b_fll_w, sdr_b_fll_n;
     extern double sdr_max_dop, sdr_thres_cn0_l, sdr_thres_cn0_u, sdr_thres_pli;
     extern int sdr_bump_jump, sdr_lost_th;
@@ -1891,6 +1898,8 @@ void sdr_rcv_setopt(const char *opt, double value)
     else if (!strcmp(opt, "el_mask"    )) sdr_el_mask     = value;
     else if (!strcmp(opt, "sp_corr"    )) sdr_sp_corr     = value;
     else if (!strcmp(opt, "t_acq"      )) sdr_t_acq       = value;
+    else if (!strcmp(opt, "t_acq_ext"  ) && value > 0.0) sdr_t_acq_ext = value;
+    else if (!strcmp(opt, "t_coh"      ) && value > 0.0) sdr_t_coh = value;
     else if (!strcmp(opt, "t_dll"      )) sdr_t_dll       = value;
     else if (!strcmp(opt, "b_dll"      )) sdr_b_dll       = value;
     else if (!strcmp(opt, "b_pll"      )) sdr_b_pll       = value;
@@ -1899,6 +1908,8 @@ void sdr_rcv_setopt(const char *opt, double value)
     else if (!strcmp(opt, "max_dop"    )) sdr_max_dop     = value;
     else if (!strcmp(opt, "thres_cn0_l")) sdr_thres_cn0_l = value;
     else if (!strcmp(opt, "thres_cn0_u")) sdr_thres_cn0_u = value;
+    else if (!strcmp(opt, "thres_cn0_ext") && value > 0.0)
+        sdr_thres_cn0_ext = value;
     else if (!strcmp(opt, "thres_pli"  )) sdr_thres_pli   = value;
     else if (!strcmp(opt, "lost_th"    )) sdr_lost_th     = (int)value;
     else if (!strcmp(opt, "bump_jump"  )) sdr_bump_jump = (int)value;
